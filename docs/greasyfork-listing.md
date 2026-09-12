@@ -6,6 +6,34 @@
 
 ---
 
+## 已发布
+
+| 项 | 值 |
+| --- | --- |
+| 脚本页 | <https://greasyfork.org/zh-CN/scripts/595525> |
+| 脚本 ID | `595525` |
+| 当前版本 | `1.11.1` |
+| 许可证 | GPL-3.0-or-later |
+| 适用站点 | 所有网站（`*://*/*`） |
+| 同步状态 | **尚未**与仓库建立脚本同步——首次发布为手工粘贴 |
+
+安装直链（可用于「从 URL 安装」）：
+
+```
+https://update.greasyfork.org/scripts/595525/%E7%BD%91%E9%A1%B5%E8%A7%86%E9%A2%91%E7%A1%AC%E5%AD%97%E5%B9%95%E5%AE%9E%E6%97%B6%E7%BF%BB%E8%AF%91%EF%BC%88OCR%20%2B%20%E7%AC%AC%E4%B8%89%E6%96%B9%E5%A4%A7%E6%A8%A1%E5%9E%8B%20API%EF%BC%89.user.js
+```
+
+### 更新已发布版本
+
+1. 先按 [`CONTRIBUTING.md` 的发版流程](../CONTRIBUTING.md#版本发布流程)递增 `@version` 并推送；
+2. 然后二选一：
+   - **手工**：脚本页 → 「更新」→ 粘贴新版全文 → 提交；
+   - **同步**（推荐）：管理 → 脚本同步（Script sync）→ 源地址填 GitHub raw URL，此后每次 push 可自动同步。
+
+> 无论哪种方式，**`@version` 都必须先递增**，否则 Greasy Fork 会提示「代码有变化但版本号未变」。
+
+---
+
 ## 表单填写对照
 
 | 表单字段 | 填什么 |

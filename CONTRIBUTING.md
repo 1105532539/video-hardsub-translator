@@ -397,24 +397,25 @@ node _test/shots.mjs     # 输出到 _test/shots/
 
 可直接粘贴的发布正文维护在 [`docs/greasyfork-listing.md`](docs/greasyfork-listing.md)。
 
-### 首次发布
+### 当前状态
 
-1. 登录 <https://greasyfork.org/zh-CN>（可用 GitHub 账号登录）。
-2. 打开 <https://greasyfork.org/zh-CN/script_versions/new>，粘贴 `video-hardsub-translator.user.js` 全文。
-3. 脚本语言选「中文（简体）」，「附加信息」粘贴上面的发布正文。
-4. 提交。
+脚本已发布：**<https://greasyfork.org/zh-CN/scripts/595525>**（脚本 ID `595525`）。
 
-> Greasy Fork **没有开放写入 API**（官方只提供只读 JSON API），因此这一步只能手工在浏览器里完成。
+首次发布是**手工粘贴**完成的——Greasy Fork 没有开放写入 API（官方只提供只读 JSON API），发布只能在浏览器里操作。因此它目前**还没有**和仓库建立同步关系，下面两种更新方式需要二选一。
 
-### 后续更新：脚本同步
+### 更新方式 A：手工粘贴（立即可用）
 
-在脚本管理页配置**脚本同步（Script sync）**，源地址填：
+脚本管理页 → 「更新」→ 粘贴新版 `video-hardsub-translator.user.js` 全文 → 提交。
+
+### 更新方式 B：脚本同步（推荐，配好后一劳永逸）
+
+脚本管理页 → 管理（Admin）→ **脚本同步（Script sync）**，源地址填：
 
 ```
 https://raw.githubusercontent.com/1105532539/video-hardsub-translator/main/video-hardsub-translator.user.js
 ```
 
-可选：在 GitHub 仓库添加 Webhook，让 push / release 立即触发同步（Greasy Fork 支持 GitHub 的 push 与 release 通知；webhook 地址需登录后在 Greasy Fork 的 webhook 信息页领取）。
+可选：在 GitHub 仓库添加 Webhook，让 push / release 立即触发同步（Greasy Fork 支持 GitHub 的 push 与 release 通知；webhook 地址需登录后在 Greasy Fork 的 webhook 信息页领取）。在第一次 webhook 生效之前，脚本的同步类型会显示为 Automatic 或 Manual。
 
 ### 注意事项
 

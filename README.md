@@ -3,6 +3,7 @@
 > 给任意网站上的 `<video>` 做「硬字幕」实时翻译：**框选字幕区 → 定时截图 → OCR / 多模态大模型 → 悬浮中文字幕**。
 > 浏览器端不需要下载任何模型，不依赖任何后端服务，一个用户脚本文件即装即用。
 
+[![Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-595525-orange.svg)](https://greasyfork.org/zh-CN/scripts/595525)
 ![version](https://img.shields.io/badge/version-1.11.1-blue.svg)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
@@ -355,7 +356,17 @@ $env:CHROME_PATH = 'D:\Apps\Chrome\chrome.exe'
 
 ## 安装指南
 
-### 方式一：从 GitHub 直接安装（推荐）
+### 方式一：从 Greasy Fork 安装（推荐）
+
+打开 [Greasy Fork 脚本页](https://greasyfork.org/zh-CN/scripts/595525)，点「**安装此脚本**」。
+
+- Greasy Fork 会自动检测新版本，更新由用户脚本管理器接管，不必手动重装；
+- **国内可直接访问**，不需要代理；
+- 脚本的讨论与评分也集中在这里。
+
+> Greasy Fork 上的版本与 GitHub 版本内容一致（同源发布）。但两者的更新渠道相互独立——Greasy Fork 版从 Greasy Fork 更新，GitHub 版从 GitHub 更新——**任选一个安装即可，不要同时装两份**。
+
+### 方式二：从 GitHub 直接安装
 
 安装用户脚本管理器后，点击下面这个链接，Tampermonkey 会弹出安装页面，点「安装」即可：
 
@@ -365,24 +376,24 @@ https://raw.githubusercontent.com/1105532539/video-hardsub-translator/main/video
 
 也可以手动操作：Tampermonkey 面板 → **实用工具** → 「从 URL 安装」→ 粘贴上面的地址。
 
-> **国内网络提示**：如果 `raw.githubusercontent.com` 打不开（国内较常见），可以把地址换成 jsDelivr 镜像——两者内容**完全一致**（已用 SHA-256 校验为同一文件）：
+> **国内网络提示**：如果 `raw.githubusercontent.com` 打不开（国内较常见），**优先改用上面的方式一（Greasy Fork）**；也可以把地址换成 jsDelivr 镜像——两者内容**完全一致**（已用 SHA-256 校验为同一文件）：
 >
 > ```
 > https://cdn.jsdelivr.net/gh/1105532539/video-hardsub-translator@main/video-hardsub-translator.user.js
 > ```
 >
-> 也可以改用下面的 **方式二（Releases）**：附件托管在 `github.com` 上，通常同样可以下载。
+> 或者改用下面的 **方式三（Releases）**：附件托管在 `github.com` 上，通常同样可以下载。
 >
 > 注意 jsDelivr 有缓存（最长约 12 小时），刚发布的新版本可能不会立刻生效；需要最新版请用上面的原始地址或 Releases。
 
-### 方式二：从 Releases 安装
+### 方式三：从 Releases 安装
 
 前往本仓库的 **Releases** 页面，下载最新版的 `video-hardsub-translator.user.js`，然后：
 
 - 直接把文件**拖进浏览器窗口**，或
 - 在 Tampermonkey 面板 → **实用工具** → 「导入文件」
 
-### 方式三：手动新建（用于二次开发）
+### 方式四：手动新建（用于二次开发）
 
 1. Tampermonkey 面板 → 「添加新脚本」
 2. 清空编辑器内容，粘贴 `video-hardsub-translator.user.js` 的全部源码
