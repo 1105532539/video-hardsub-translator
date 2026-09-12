@@ -365,6 +365,16 @@ https://raw.githubusercontent.com/1105532539/video-hardsub-translator/main/video
 
 也可以手动操作：Tampermonkey 面板 → **实用工具** → 「从 URL 安装」→ 粘贴上面的地址。
 
+> **国内网络提示**：如果 `raw.githubusercontent.com` 打不开（国内较常见），可以把地址换成 jsDelivr 镜像——两者内容**完全一致**（已用 SHA-256 校验为同一文件）：
+>
+> ```
+> https://cdn.jsdelivr.net/gh/1105532539/video-hardsub-translator@main/video-hardsub-translator.user.js
+> ```
+>
+> 也可以改用下面的 **方式二（Releases）**：附件托管在 `github.com` 上，通常同样可以下载。
+>
+> 注意 jsDelivr 有缓存（最长约 12 小时），刚发布的新版本可能不会立刻生效；需要最新版请用上面的原始地址或 Releases。
+
 ### 方式二：从 Releases 安装
 
 前往本仓库的 **Releases** 页面，下载最新版的 `video-hardsub-translator.user.js`，然后：
