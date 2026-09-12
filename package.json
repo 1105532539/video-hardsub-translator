@@ -1,0 +1,45 @@
+{
+  "name": "video-hardsub-translator",
+  "version": "1.11.0",
+  "description": "网页视频硬字幕实时翻译：框选字幕区 → 定时截图 → OCR/多模态大模型 → 悬浮中文字幕。支持视觉大模型 / Umi-OCR / 有道图片翻译三种引擎，浏览器无需下载模型。",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "author": "1105532539",
+  "homepage": "https://github.com/1105532539/video-hardsub-translator",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1105532539/video-hardsub-translator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1105532539/video-hardsub-translator/issues"
+  },
+  "keywords": [
+    "userscript",
+    "tampermonkey",
+    "violentmonkey",
+    "subtitle",
+    "hardsub",
+    "ocr",
+    "translation",
+    "vision-language-model",
+    "umi-ocr",
+    "youdao"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node _test/engine.mjs && node _test/opt.mjs && node _test/allsite.mjs && node _test/smoke-panel.mjs && node _test/layout.mjs && node _test/fullscreen.mjs",
+    "test:engine": "node _test/engine.mjs",
+    "test:opt": "node _test/opt.mjs",
+    "test:allsite": "node _test/allsite.mjs",
+    "test:panel": "node _test/smoke-panel.mjs",
+    "test:layout": "node _test/layout.mjs",
+    "test:fullscreen": "node _test/fullscreen.mjs",
+    "lint": "node --check video-hardsub-translator.user.js",
+    "bench": "node _test/bench.mjs",
+    "bench:ab": "node _test/bench-ab.mjs",
+    "structure": "node _test/structure.mjs",
+    "shots": "node _test/shots.mjs"
+  }
+}

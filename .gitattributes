@@ -1,0 +1,9 @@
+# 统一换行符为 LF。
+# 为什么需要它：Git for Windows 默认 core.autocrlf=true，没有这条规则时
+# 同一个人在 Windows / macOS / Linux 之间协作会产生整文件级别的换行符 diff；
+# 显式声明后，仓库内一律 LF，检出时也保持 LF，任何平台提交都不会产生这种噪声。
+* text=auto eol=lf
+
+# 二进制资源：不做换行符转换，也不做文本 diff
+*.png  binary
+*.webm binary

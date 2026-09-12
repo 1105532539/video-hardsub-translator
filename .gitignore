@@ -1,0 +1,50 @@
+# ═══════════════════════════════════════════════════════════════
+#  video-hardsub-translator — 忽略规则
+#  原则：只把「项目本身」入库；本地快照、个人文件、调试脚本、
+#        测试中间产物和任何凭据一律排除在外。
+# ═══════════════════════════════════════════════════════════════
+
+# ── 本地版本快照 / 个人文件（仅本机保留）─────────────────────
+_backup/
+.bili/
+dsh-upgrade/
+
+# 早期版本的独立副本：历史版本请走 releases / git 历史，
+# 不再往仓库里堆一份 177KB 的旧脚本
+video-hardsub-translator1.user.js
+
+# ── 一次性调试脚本（不属于项目，仅作者本机用过）──────────────
+/_cdp_verify.mjs
+/_netcheck.mjs
+/_youdao_probe.mjs
+/_ytdiag.mjs
+
+# ── 测试运行产生的中间产物 ──────────────────────────────────
+_test/_ab.json
+_test/_ab-summary.json
+_test/_bench-last.json
+_test/_opt.txt
+# 测试启动时会从 _test/vendor/ 和 _test/fixtures/ 复制到这里
+_test/pages/hls.min.js
+_test/pages/fixtures/
+
+# ── 凭据与密钥（绝对不要入库）───────────────────────────────
+.secrets/
+.env
+.env.*
+*.token
+gh-token*.txt
+*.pem
+
+# ── 编辑器 / 操作系统 ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+*~
+
+# ── 日志 / 依赖 ─────────────────────────────────────────────
+*.log
+node_modules/
+npm-debug.log*

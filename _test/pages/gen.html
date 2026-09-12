@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>fixture generator</title>
+</head>
+<body>
+<h3>fixture generator</h3>
+<canvas id="c"></canvas>
+<script src="pattern.js"></script>
+<script>
+// 用 MediaRecorder 把图案录成 webm，返回 base64 供 Node 落盘。
+window.__makeFixture = async function () {
+    const P = window.__PATTERN__;
+    const c = document.createElement('canvas');
+    c.width = P.W;
+    c.height = P.H;
+    const x = c.getContext('2d');
+    P.drawPattern(x);
+
+    const stream = c.captureStream(30);
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+        ? 'video/webm;codecs=vp8' : 'video/webm';
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 3000000 });
+
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(r => { rec.onstop = r; });
+
+    rec.start(200);
+    await new Promise(r => setTimeout(r, 2500));
+    rec.stop();
+    await stopped;
+
+    const blob = new Blob(chunks, { type: mime });
+    const dataUrl = await new Promise(r => {
+        const fr = new FileReader();
+        fr.onload = () => r(fr.result);
+        fr.readAsDataURL(blob);
+    });
+    return {
+        b64: dataUrl.split(',')[1],
+        bytes: blob.size,
+        mime,
+        pattern: {
+            W: P.W, H: P.H, BAND_Y: P.BAND_Y, BAND_H: P.BAND_H,
+            CW: P.CW, CH: P.CH, SUBTITLE_TEXT: P.SUBTITLE_TEXT,
+        },
+    };
+};
+</script>
+</body>
+</html>

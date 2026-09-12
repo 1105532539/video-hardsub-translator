@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>含 iframe 的宿主页</title>
+<style>
+  html, body { margin: 0; background: #0b0d11; color: #dde3ee; font: 14px sans-serif; }
+  #theframe { width: 900px; height: 600px; border: 0; display: block; margin: 10px; }
+</style>
+</head>
+<body>
+<div id="host-note">宿主页自身没有 video 元素，视频在 iframe 里</div>
+<script>
+  // 用 iframe 模拟"播放器嵌在子框架里"的真实站点结构
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var f = document.createElement('iframe');
+    f.id = 'theframe';
+    f.src = q.get('src') || 'empty.html';
+    f.onload = function () { window.__frameLoaded = true; };
+    document.body.appendChild(f);
+  })();
+</script>
+</body>
+</html>

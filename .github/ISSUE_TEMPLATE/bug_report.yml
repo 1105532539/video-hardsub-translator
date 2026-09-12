@@ -1,0 +1,105 @@
+name: 🐞 Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写完整，尤其是**诊断报告**——它能让我们直接看到区域换算、截图后端与错误详情。
+
+        > ⚠️ 提交前请确认已移除 API Key / appSecret / 导出的配置文件等敏感信息（导出的配置**包含 Key**）。
+
+  - type: input
+    id: version
+    attributes:
+      label: 脚本版本
+      description: 面板底部或诊断报告里的版本号
+      placeholder: 1.11.0
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 浏览器与用户脚本管理器
+      description: 例如「Chrome 131 / Tampermonkey 5.3」
+      placeholder: Chrome 131 / Tampermonkey 5.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: 使用的识别引擎
+      options:
+        - openai-vision（视觉大模型）
+        - umi-ocr（本机 Umi-OCR）
+        - youdao-img（有道图片翻译）
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 模型 / 接口地址
+      description: 例如「deepseek-flash @ https://api.deepseek.com」。请勿填写 Key
+      placeholder: deepseek-flash @ https://api.deepseek.com
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请写出从打开页面到出现问题的完整步骤
+      placeholder: |
+        1. 打开某视频页面
+        2. 点「① 框选字幕区」框住字幕带
+        3. 点「开始」
+        4. 出现 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 状态栏提示、悬浮字幕表现、控制台报错等
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告
+      description: 面板 →「诊断」→「复制报告」，粘贴到此处（不含 API Key）
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已尝试的排查
+      description: 例如换过引擎、调过截图间隔、换过网站、是否跨域视频等
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认粘贴的内容中不含 API Key、appSecret 等敏感信息
+          required: true
+        - label: 我已搜索过现有 Issue，确认不是重复问题
+          required: true
