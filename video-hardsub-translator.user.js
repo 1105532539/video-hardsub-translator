@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网页视频硬字幕实时翻译（OCR + 第三方大模型 API）
-// @namespace    local.hardsub.translate
-// @version      1.11.0
+// @namespace    https://github.com/1105532539/video-hardsub-translator
+// @version      1.11.1
 // @description  任意网站通用：框选视频硬字幕区域，定时截图 → OCR → 调用第三方大模型 API 翻译成中文 → 悬浮字幕显示
 // @author       1105532539
 // @license      GPL-3.0-or-later
@@ -2344,7 +2344,7 @@
     //      —— 既是给你自查用的取证工具，也是自动化测试的观察窗口
     // ═══════════════════════════════════════════════════════════════
 
-    const SCRIPT_VERSION = '1.11.0';
+    const SCRIPT_VERSION = '1.11.1';
 
     const Diag = {
         modal: null,

@@ -4,6 +4,16 @@
 版本号遵循语义化版本（SemVer）。更早的 1.4.0~1.10.0 为发布前的本地迭代记录。
 每条记录均由归档快照之间的实际代码差异（`git diff --no-index`）比对得出。
 
+## [1.11.1] - 2026-09-12
+
+### 变更
+- `@namespace` 由 `local.hardsub.translate` 改为代码仓库地址 `https://github.com/1105532539/video-hardsub-translator`。Greasy Fork 要求该字段存在，并且**在更新时如果发现它发生变化会发出警告**；用户脚本管理器也用 `@name` + `@namespace` 组合判断「这个脚本是否已安装」。因此趁首次发布到 Greasy Fork 之前把它固定为与仓库一致的值，避免日后改动导致已安装用户被识别成另一个脚本、收不到更新。
+- 为发布到 Greasy Fork 做准备：新增 `docs/greasyfork-listing.md`（可直接粘贴的发布正文 + 表单填写对照 + 合规自查），并在 `CONTRIBUTING.md` 中新增「发布到 Greasy Fork」一节，把同步步骤与注意事项（`@version` 必须递增、`@namespace` 不可再改、Greasy Fork 会改写 `@downloadURL` / `@updateURL`、发布文案不得引导用户改用其它安装源）写入发版流程。
+- 修正 `CONTRIBUTING.md` 发版流程中的版本号位置：由「两处」更正为「四处」——此前遗漏了 `package.json` 的 `version` 与 `README.md` 顶部的 version 徽章，实际发版时这两处也会与脚本版本号脱节。
+
+### 说明
+- 本版**不含任何功能或行为改动**：脚本逻辑与 1.11.0 完全一致，仅元数据（`@namespace` / `@version` / `SCRIPT_VERSION`）与文档调整。
+
 ## [1.11.0] - 2026-09-12
 
 ### 新增

@@ -1,6 +1,6 @@
 {
   "name": "video-hardsub-translator",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "description": "网页视频硬字幕实时翻译：框选字幕区 → 定时截图 → OCR/多模态大模型 → 悬浮中文字幕。支持视觉大模型 / Umi-OCR / 有道图片翻译三种引擎，浏览器无需下载模型。",
   "private": true,
   "license": "GPL-3.0-or-later",

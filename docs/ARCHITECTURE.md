@@ -1,7 +1,7 @@
 # 架构与模块职责
 
 > 本文面向想读懂、修改或扩展本脚本的开发者。所有结论均以
-> `video-hardsub-translator.user.js`（v1.11.0）的实现为准。
+> `video-hardsub-translator.user.js`（v1.11.1）的实现为准。
 
 ---
 

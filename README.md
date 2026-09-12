@@ -3,7 +3,7 @@
 > 给任意网站上的 `<video>` 做「硬字幕」实时翻译：**框选字幕区 → 定时截图 → OCR / 多模态大模型 → 悬浮中文字幕**。
 > 浏览器端不需要下载任何模型，不依赖任何后端服务，一个用户脚本文件即装即用。
 
-![version](https://img.shields.io/badge/version-1.11.0-blue.svg)
+![version](https://img.shields.io/badge/version-1.11.1-blue.svg)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
 ![runtime](https://img.shields.io/badge/runtime-Node.js%20%E2%89%A5%2022-brightgreen.svg)

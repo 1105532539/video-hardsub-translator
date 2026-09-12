@@ -367,24 +367,63 @@ node _test/shots.mjs     # 输出到 _test/shots/
 
 ## 版本发布流程
 
-1. 确认 `main` 上全部测试通过。
-2. 更新**两处**版本号（必须一致）：
-   - 用户脚本头部元数据 `// @version      1.11.0`
-   - 脚本内 `const SCRIPT_VERSION = '1.11.0';`
+1. 确认 `main` 上全部测试通过（`npm test`，应 306 项全部通过）。
+2. 更新**四处**版本号（必须全部一致——只改前两处会导致包版本与 README 徽章和脚本版本脱节）：
+   - 用户脚本头部元数据 `// @version      <新版本号>`
+   - 脚本内 `const SCRIPT_VERSION = '<新版本号>';`
+   - `package.json` 的 `version`
+   - `README.md` 顶部的 version 徽章
 3. 更新 `CHANGELOG.md`，把 `[未发布]` 改为具体版本与日期。
 4. 提交并打标签：
    ```bash
-   git commit -am "chore(release): v1.11.0"
-   git tag -a v1.11.0 -m "v1.11.0"
+   git commit -am "chore(release): v<新版本号>"
+   git tag -a v<新版本号> -m "v<新版本号>"
    git push origin main --tags
    ```
 5. 在 GitHub 上创建 Release，附上 CHANGELOG 对应段落，并上传 `video-hardsub-translator.user.js` 作为附件（方便用户直接下载安装）。
+6. 同步到 Greasy Fork（见下节）。
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)：
 
 - **主版本**：破坏性变更（旧配置无法继续使用）
 - **次版本**：向后兼容的新功能
 - **修订号**：向后兼容的缺陷修复
+
+> 即使只改了文档或元数据，也**同样要递增修订号**：Greasy Fork 检测到代码变化而 `@version` 未变时会发出警告，用户脚本管理器也不会向已安装用户推送更新。
+
+---
+
+## 发布到 Greasy Fork
+
+可直接粘贴的发布正文维护在 [`docs/greasyfork-listing.md`](docs/greasyfork-listing.md)。
+
+### 首次发布
+
+1. 登录 <https://greasyfork.org/zh-CN>（可用 GitHub 账号登录）。
+2. 打开 <https://greasyfork.org/zh-CN/script_versions/new>，粘贴 `video-hardsub-translator.user.js` 全文。
+3. 脚本语言选「中文（简体）」，「附加信息」粘贴上面的发布正文。
+4. 提交。
+
+> Greasy Fork **没有开放写入 API**（官方只提供只读 JSON API），因此这一步只能手工在浏览器里完成。
+
+### 后续更新：脚本同步
+
+在脚本管理页配置**脚本同步（Script sync）**，源地址填：
+
+```
+https://raw.githubusercontent.com/1105532539/video-hardsub-translator/main/video-hardsub-translator.user.js
+```
+
+可选：在 GitHub 仓库添加 Webhook，让 push / release 立即触发同步（Greasy Fork 支持 GitHub 的 push 与 release 通知；webhook 地址需登录后在 Greasy Fork 的 webhook 信息页领取）。
+
+### 注意事项
+
+- **`@version` 必须先递增**，否则同步会因「代码变了但版本没变」告警。
+- **`@namespace` 不要再改**。Greasy Fork 在更新时若发现该字段变化会警告，用户脚本管理器也据此判定「是否已安装」。它现已固定为仓库地址。
+- **不要删 `@downloadURL` / `@updateURL`**。Greasy Fork 会自动把它们改写为指向自己的地址：GitHub 版从 GitHub 更新、Greasy Fork 版从 Greasy Fork 更新，互不干扰。
+- **发布正文里不要引导用户改用 GitHub 安装**——Greasy Fork 规则明确禁止引导用户使用其它下载源。把仓库作为「代码仓库 / 问题反馈」链接是允许的。
+- 描述必须与实际功能一致：**要写明脚本会把框选区域的截图发送给用户自行配置的第三方 API**。
+- 本脚本**不需要 `@antifeature`**：没有广告、追踪、挖矿、会员或返利链接；`payment` 类型针对的是「要求用户向脚本作者付费」，而本脚本的付费对象是第三方 API 供应商，且 Umi-OCR 引擎完全本地免费。
 
 ---
 

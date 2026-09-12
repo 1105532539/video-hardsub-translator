@@ -1,7 +1,7 @@
 # 接口文档
 
 > 本文档分三部分：脚本**对外调用**的第三方 API、脚本**对外暴露**的内部 JS API，
-> 以及贯穿全局的数据结构。以 `video-hardsub-translator.user.js` v1.11.0 为准。
+> 以及贯穿全局的数据结构。以 `video-hardsub-translator.user.js` v1.11.1 为准。
 
 ---
 
@@ -375,7 +375,7 @@ curl https://openapi.youdao.com/ocrtransapi \
 
 ```js
 const H = window.__H1SUB__;
-H.version;              // '1.11.0'
+H.version;              // '1.11.1'
 ```
 
 > 该接口是**调试/测试用途**，不保证跨版本稳定；正式集成请以用户脚本本身为准。
