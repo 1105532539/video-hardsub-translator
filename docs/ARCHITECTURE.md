@@ -1,13 +1,15 @@
 # 架构与模块职责
 
 > 本文面向想读懂、修改或扩展本脚本的开发者。所有结论均以
-> `video-hardsub-translator.user.js`（v1.11.1）的实现为准。
+> `src/` 下的模块源码（v1.12.0）为准；根目录的
+> `video-hardsub-translator.user.js` 是由它们拼接出来的产物。
 
 ---
 
 ## 目录
 
 - [总体设计](#总体设计)
+- [源码结构与构建](#源码结构与构建)
 - [模块地图](#模块地图)
 - [数据流](#数据流)
 - [截图器 Capturer](#截图器-capturer)
@@ -26,14 +28,16 @@
 
 ## 总体设计
 
-脚本是一个**单文件 IIFE**（立即执行函数），运行在页面主世界（page context）。没有构建步骤、没有第三方运行时依赖。
+源码按功能组件拆成 `src/` 下的多个模块，构建时**原样拼接**成根目录的单个用户脚本。
+产物仍然是一个 `IIFE`（立即执行函数），运行在页面主世界（page context），
+没有第三方运行时依赖，装进 Tampermonkey 依然只是一个文件。
 
 ```js
 (function () {
     'use strict';
     if (window.__H1SUB_LOADED__) return;   // 同一文档只初始化一次
     window.__H1SUB_LOADED__ = true;
-    // … 全部逻辑 …
+    // … src/ 下的模块按编号顺序原样拼在这里 …
 })();
 ```
 
@@ -60,22 +64,130 @@
 
 ---
 
+## 源码结构与构建
+
+### 目录
+
+```
+src/
+├── 00-header.js          用户脚本元数据块（==UserScript==）与总说明（纯注释）
+├── 10-config.js          配置：默认值、读写、规整、平台预设、模型能力判定
+├── 12-log.js             日志
+├── 14-constants.js       热路径常量与状态栏配色
+├── 20-video.js           视频元素定位
+├── 22-site.js            站点级行为：禁用开关、视频出现监听、按站点记忆区域
+├── 24-region.js          区域锚定与坐标换算
+├── 30-image.js           截图分析与文本相似度（热路径）
+├── 32-util.js            通用小工具（JSON 容错解析、data URL、休眠…）
+├── 40-http.js            GM_xmlhttpRequest 封装
+├── 42-youdao-sign.js     SHA-256、UUID 与有道错误码
+├── 44-umi-ocr.js         Umi-OCR 本机识别
+├── 46-youdao-image.js    有道图片翻译
+├── 48-browser-ai.js      浏览器内置 AI：完全离线的识别 / 翻译
+├── 49-web-translate.js   免费网页接口：逆向的内部接口翻译
+├── 50-capturer.js        截图器（element / display 双后端）
+├── 60-chat.js            OpenAI 兼容接口与翻译缓存
+├── 62-engines.js         五种引擎的统一入口
+├── 70-pipeline.js        主循环
+├── 80-overlay.js         悬浮字幕层
+├── 82-fullscreen.js      全屏适配
+├── 84-html.js            HTML 转义、Trusted Types、颜色
+├── 86-selector.js        区域框选器
+├── 88-diag.js            诊断模式
+├── 90-panel-html.js      控制面板：HTML 骨架
+├── 92-panel-css.js       控制面板：样式表
+├── 94-modal.js           通用弹窗骨架
+├── 96-panel-ui.js        控制面板：控件绑定、配置档案、导入导出
+└── 98-boot.js            启动装配
+```
+
+**文件名前缀的两位数字就是拼接顺序**，后文可以依赖前文。
+
+### 构建
+
+```bash
+npm run build          # 生成 video-hardsub-translator.user.js
+npm run build:check    # 只校验产物是否与 src/ 一致（提交前 / CI）
+npm run lint           # 构建 + 语法检查
+```
+
+`_build/build.mjs` 是**零依赖**的纯 Node 脚本（只用 `node:fs` / `node:path` /
+`node:vm`），仓库不需要 `npm install`。它做四件事：
+
+1. 按编号顺序读入 `src/*.js`，拼进同一个 IIFE；
+2. **核对模块头声明**：每个模块必须在头部写清「对外提供」与「依赖」，
+   脚本会检查"声称提供的名字是否真的定义了""依赖的名字是否真有人提供""有没有两个
+   模块定义了同名顶层绑定""版本号三处是否一致"；
+3. 用 `vm.Script` 解析一遍产物（只解析不执行），语法错误挡在写文件之前；
+4. 写入根目录产物，保证 LF 行尾、无 BOM。
+
+### 三条硬性规则
+
+| 规则 | 原因 |
+| --- | --- |
+| **不要手改根目录的 `.user.js`** | 它是产物，下次构建就覆盖。改 `src/`，再 `npm run build` |
+| **顶层名字全局唯一** | 所有模块共享同一个 IIFE 作用域，重名会互相覆盖 —— 构建脚本会拦下来 |
+| **模块头必须写「对外提供 / 依赖」** | 这是共享作用域下唯一能表达接口的地方，也由构建脚本核对 |
+
+拼接是**纯文本搬运**，不做任何重命名、转译或作用域包装，所以"源码即产物"这条
+可审计性依然成立：把 `src/` 的模块按顺序连起来（去掉模块头注释）就是产物本身。
+
+### 为什么不做成 `import` / `export`
+
+用户脚本没有模块加载器，`@require` 又需要外部托管、破坏"点一下就能装"。而本项目里
+`UI` / `Pipeline` / `Capturer` / `Overlay` / `Fullscreen` / `Diag` / `RegionSelector`
+这七个单例之间是**双向引用**的（例如 `Fullscreen.sync()` 要摆布 `UI.root` 和
+`Overlay.el`，而 `Overlay.show()` 又要回调 `Fullscreen`）。原实现靠的就是同一个词法
+作用域 + 函数声明提升 + 调用时才求值；改成 `import` 会让这些回边变成模块初始化期
+的循环依赖，收益不抵风险。所以模块化的边界落在**文件与声明**上：
+
+- 每个模块头写明它对外提供什么、依赖谁；
+- 构建脚本把这些声明当成契约来校验；
+- 跨模块调用一律在函数体内发生（不在顶层初始化时用别人的东西），
+  这条规则保证拼接顺序只需要满足"声明在前"即可。
+
+### 已知边界
+
+`96-panel-ui.js` 仍然有 1100 多行 —— 因为 `UI` 是一个巨大的对象字面量，
+拆它需要用 `Object.assign(UI, {...})` 把字面量切开，属于会改变代码结构的改动。
+当前版本优先选择"零行为变化"，所以先保持整块；后续若要继续拆，可按
+"面板骨架 / 控件绑定 / 配置档案 / 状态显示"四条线用 `Object.assign` 拆分。
+
+---
+
 ## 模块地图
 
-| # | 章节 | 主要成员 | 职责 |
-| --- | --- | --- | --- |
-| 一 | 配置 | `DEFAULTS` `CFG` `loadCfg` `sanitizeCfg` `saveCfg` `saveCfgKeys` `API_PRESETS` `isNoVisionModel` | 默认值、校验、持久化、平台预设、模型能力判定 |
-| 二 | 日志 | `log` `warn` | 统一 `[字幕翻译]` 前缀 |
-| 三 | 工具函数 | `findVideo` `getContentBox` `anchorRegion` `resolveRegion` `thumbnail` `thumbDiff` `edgeDensity` `textSimilarity` `parseModelJson` `setHTML` `escapeHtml` | 纯计算与 DOM 小工具 |
-| 四 | HTTP | `gmRequest` `sha256Hex` `callUmiOCR` `umiProbe` `callYoudaoImage` | 网络封装与两个非 OpenAI 引擎 |
-| 五 | 截图器 | `Capturer` | 双后端截图、裁切缩放、污染处理 |
-| 六 | 翻译引擎 | `cacheGet` `cachePut` `buildChatBody` `extractContent` `callChat` `translateByVision` `translateText` `recognizeAndTranslate` | 缓存、请求构造、响应解析、引擎分发 |
-| 七 | 主循环 | `Pipeline` | 定时、守卫、跳过判定、结果展示、错误恢复 |
-| 八 | 字幕悬浮层 | `Overlay` | 字幕渲染、定位、全屏搬移、原生字幕轨回退 |
-| 九 | 区域框选器 | `RegionSelector` | 拖拽框选、实时预览、锚点记录 |
-| 十 | 诊断模式 | `Diag` | 记录、报告生成、区域对齐可视化 |
-| 十一 | 控制面板 UI | `UI` `panelHTML` `panelCSS` `openModal` `Fullscreen` | 面板构建、控件绑定、档案、导入导出 |
-| 十二 | 启动 | `boot` `mountUI` `watchForVideo` | 挂载决策、视频监听、SPA 路由轮询、油猴菜单 |
+| 模块 | 主要成员 | 职责 |
+| --- | --- | --- |
+| `10-config` | `DEFAULTS` `CFG` `loadCfg` `sanitizeCfg` `saveCfg` `saveCfgKeys` `API_PRESETS` `isNoVisionModel` | 默认值、校验、持久化、平台预设、模型能力判定 |
+| `12-log` | `log` `warn` | 统一 `[字幕翻译]` 前缀 |
+| `14-constants` | `THUMB_W/H` `EDGE_*` `NO_CHANGE_DIFF` `STATUS_COLORS` | 热路径阈值与配色 |
+| `20-video` | `findVideo` | 找到页面上"最大"的 `<video>`（主播放器） |
+| `22-site` | `isHostDisabled` `banCurrentHost` `isTopFrame` `watchForVideo` `syncRegionForHost` `rememberRegion` | 按站点决定是否介入、视频后加载监听、按站点记忆区域 |
+| `24-region` | `getContentBox` `resolveRegion` `anchorRegion` | 画面内容框推算与区域锚定换算 |
+| `30-image` | `thumbnail` `thumbDiff` `edgeDensity` `textSimilarity` | 三个"要不要花钱调 API"的判定 |
+| `32-util` | `parseModelJson` `sleep` `canvasToJpeg` `stripDataUrlPrefix` `stripWrappingQuotes` | 纯计算小工具 |
+| `40-http` | `gmRequest` | `GM_xmlhttpRequest` Promise 封装（绕 CORS） |
+| `42-youdao-sign` | `sha256Hex` `sha256HexJS` `youdaoTruncate` `uuidHex` `YOUDAO_ERR` | 有道签名素材与错误码翻译 |
+| `44-umi-ocr` | `UMI_LANGS` `callUmiOCR` `umiProbe` `recognizeByUmi` `umiBase` | 本机 Umi-OCR 识别（零下载） |
+| `46-youdao-image` | `callYoudaoImage` | 有道图片翻译（OCR + 翻译一步） |
+| `48-browser-ai` | `baiProbe` `baiPrepare` `baiTranslate` `baiOcrByBuiltin` `recognizeByBrowserAI` | 浏览器内置 AI：完全离线的识别 / 翻译 |
+| `49-web-translate` | `wtTranslate` `wtSelftest` `wtLangPair` `wtStats` `recognizeByWebTranslate` | 免费网页接口（逆向）：降级链、限速、token 重取 |
+| `50-capturer` | `Capturer` | 双后端截图、裁切缩放、污染处理 |
+| `60-chat` | `cacheGet` `cachePut` `apiUrl` `buildChatBody` `extractContent` `callChatCore` `callChat` | LRU 缓存、请求构造、响应解析、HTTP 错误翻译 |
+| `62-engines` | `translateByVision` `translateText` `recognizeAndTranslate` | 五种引擎的统一入口 |
+| `70-pipeline` | `Pipeline` | 定时、守卫、跳过判定、结果展示、错误恢复 |
+| `80-overlay` | `Overlay` | 字幕渲染、定位 |
+| `82-fullscreen` | `Fullscreen` `uiHost` | 全屏时搬移 UI、`<video>` 全屏时改走原生字幕轨 |
+| `84-html` | `escapeHtml` `setHTML` `TT_POLICY` `hexToRgb` | Trusted Types 兼容层与样式小工具 |
+| `86-selector` | `RegionSelector` | 拖拽框选、实时预览、锚点记录 |
+| `88-diag` | `Diag` `SCRIPT_VERSION` | 记录、报告生成、区域对齐可视化 |
+| `90-panel-html` | `panelHTML` | 面板 DOM 骨架（只放结构，不放行为） |
+| `92-panel-css` | `panelCSS` | 面板与弹窗样式 |
+| `94-modal` | `openModal` | 诊断 / 导入导出共用的弹窗骨架 |
+| `96-panel-ui` | `UI` | 面板构建、控件绑定、档案、导入导出、状态显示 |
+| `98-boot` | `isConfigured` `boot` `mountUI` | 挂载决策、测试钩子、油猴菜单、SPA 路由轮询 |
+
 
 ---
 
@@ -301,9 +413,11 @@ function buildChatBody(messages, { temperature = 0.2, maxTokens } = {}) {
 ### 引擎分发
 
 ```js
-async function recognizeAndTranslate(canvas) {
-    if (CFG.engine === 'youdao-img') return await callYoudaoImage(canvasToJpeg(canvas, 0.9));
-    if (CFG.engine === 'umi-ocr')    return await recognizeByUmi(canvas);
+async function recognizeAndTranslate(canvas, opts) {
+    if (CFG.engine === 'youdao-img')    return await callYoudaoImage(canvasToJpeg(canvas, 0.9));
+    if (CFG.engine === 'browser-ai')    return await recognizeByBrowserAI(canvas, opts);
+    if (CFG.engine === 'web-translate') return await recognizeByWebTranslate(canvas);
+    if (CFG.engine === 'umi-ocr')       return await recognizeByUmi(canvas);
     return await translateByVision(canvasToJpeg(canvas, 0.85));   // 默认
 }
 ```
@@ -311,6 +425,55 @@ async function recognizeAndTranslate(canvas) {
 JPEG 质量按引擎分别调过：`openai-vision` 用 0.85（视觉模型对压缩不敏感，省流量），`umi-ocr` 用 0.92（PaddleOCR 对细节更敏感），有道用 0.9。
 
 > 图片**必须放在 `user` 消息里**：DeepSeek 明确不接受 `system` / `assistant` 消息中的图片（会返回 400）。
+
+### 浏览器内置 AI（完全离线引擎）
+
+`48-browser-ai.js` 把「浏览器自带的端侧模型」接成第四条引擎。它复用了两条已有的识别路径，只把**翻译**换成端侧：
+
+```
+识别  umi     → callUmiOCR()（44-umi-ocr.js，本机 PaddleOCR）
+      builtin → LanguageModel.prompt([{role:'user', content:[text, image]}])
+翻译  auto / translator → Translator.translate() / translateStreaming()
+                          直连是坏语言对时 → 经英语中转（ja→en 再 en→zh）
+      prompt            → LanguageModel.prompt()（文本翻译，不声明 expectedOutputs）
+```
+
+下面四条是**实测**（Chrome 153）得到的约束，实现里每一条都有对应处理，改这块之前请先读：
+
+| 约束 | 实测表现 | 处理 |
+| --- | --- | --- |
+| 下载必须在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 只由面板「② 准备离线模型」按钮触发下载；主循环只用已建好的会话 |
+| 端侧模型声明语言里没有中文 | `availability({expectedOutputs:[{type:'text',languages:['zh']}]})` → `unavailable`；`en`/`ja`/`fr`/`de`/`es` → `downloadable` | 要它输出中文时不写 `expectedOutputs`，靠系统提示词引导；多模态读图按**源语言**声明 |
+| 跨域 iframe 默认不可用 | Permissions Policy 限制（顶层窗口与同源 iframe 才有） | `baiFrameNote()` 探测并在面板/诊断里说清楚 |
+| 流式分片语义未定 | Chrome 当前给的是**累计**文本，规范讨论过改成**增量**；Edge 的 `translateStreaming` 实测**只回 1 个分片**（等价于一次性调用） | `baiJoinChunk()` 两种都认，避免升级后串字 |
+| **模型在重复输入上会失控** | 纯拟声字幕（「ああっああっ」）会让 `ja→en` 吐出 971 字的 `Oh, oh, oh…`，再过一遍 `en→zh` 被放大成 3613 字、耗时 5.6 秒 | `baiCollapseRepeat()` 把「同一 1~6 字符片段重复 ≥5 次」压成两遍（阈值取 5，正常的四连重复不误伤）；**中转的第一段也压**，否则会被第二段放大一轮；`baiPolish()` 收尾去引号 / 去尾逗号 / 按「原文 ×4」兜底长度 |
+| **Edge 不是同一套实现** | Edge 145：**没有 `LanguageModel`**（没有 Prompt API）；`Translator` 对 **`ja→zh` 全系变体**（`zh`/`zh-Hans`/`zh-Hant`/`zh-CN`/`zh-TW`/`ja-JP→zh`）`create()` 成功但 `translate()` 必抛 `UnknownError: Other generic failures occurred.`；而 `ja→en`、`ja→ko`、`ja→fr`、`en→zh` 都正常 | ① 「内置多模态读图」在 Edge 上直接给出可操作提示；② **经英语中转**（`baiPivotTranslate`，ja→en→zh）；③ `baiPrepare()` 里真跑一句自检，把坏语言对在**用户手势还在**的时候就试出来；④ `baiBrokenPairs` 按语言对记住结论，避免每帧重撞 |
+
+> 第 5 条是这条引擎最容易踩空的地方：**只探测 `availability()` 看不出问题** —— Edge 会老老实实回 `downloadable`/`available`，`create()` 也成功，只有真去 `translate()` 才炸。所以 `baiPrepare()` 的自检不是锦上添花，它是唯一能在“用户还没开始播”时发现问题的时机。
+
+会话是**有状态且昂贵**的，所以按「语言对 + 模式」缓存在 `baiCache` 里复用（`baiReuse`）：每句都 `create()` 会把模型反复加载，单句耗时从几十毫秒涨到几百毫秒。换语言 / 换模式 / 用户重置时 `baiReset()` 统一销毁。
+
+流式显示（`CFG.baiStream`）由 `Pipeline.partialSink(myGen)` 落到字幕上，三层保护：开关关闭时返回 `undefined`（引擎退回一次性调用）、用**代**校验丢弃作废分片、按 80 ms 节流（模型一秒能吐几十个分片，每个都写 `innerHTML` 会带一次强制重排）。
+
+### 免费网页接口（`49-web-translate.js`）
+
+复用翻译网站**自己前端在用的那份接口**，只做文本翻译，识别交给本机 Umi-OCR。三个引擎 + 一条降级链：
+
+```
+翻译  腾讯 transmart（纯 JSON、无鉴权） → 彩云小译（前端公开 token） → 必应（抓 IG + token）
+识别  callUmiOCR()（与 umi-ocr 引擎共用）
+```
+
+| 设计点 | 为什么 |
+| --- | --- |
+| `wtLangPair(id, src, tgt)` 逐家映射语言码 | 同一门语言三家叫法不同：必应要 `auto-detect`/`zh-Hans`，彩云要 `ja2zh` 且**不接受 `auto`**，腾讯繁体用 `zh-TW`。返回 `null` 表示这家用不了，直接跳过 |
+| 降级链逐个试，全挂时把**每一家的原因**拼进错误 | 逆向接口的失败原因很重要（改版？限流？），只说一句"翻译失败"没法排查 |
+| `wtMinInterval` 限速（默认 1200ms） | 同一引擎两次请求强制隔开，别把人家接口打挂 —— 也就不容易吃到限流 |
+| 必应空 body ⇒ 视为 token 过期，丢掉上下文重抓一次 | token 与 cookie 绑定，页面里的 `params_AbusePreventionHelper` 有有效期。另外实测 `www.bing.com` 会回 200 + **空 body**，所以固定用 `cn.bing.com` |
+| `wtStats` 记每个引擎的成败与最近错误，进诊断报告 | 出问题时能一眼看出是谁挂了 |
+| 复用 `cacheGet` / `cachePut`（键带 `wt|` 前缀和引擎链） | 换接口或换语言对之后不该命中旧译文 |
+
+> ⚠️ 这几个是**内部接口而非公开 API**，服务条款上通常不允许第三方直接调用，且随时可能改版/限流。面板与 `README` 都写明了这一点，模块头注释里也有。
 
 ---
 
@@ -438,7 +601,7 @@ fullscreenchange
 - 相似度 DP 交换长短串只影响滚动行长度，编辑距离与 `1 - dist/max(m,n)` 都是对称的；
 - 画布复用不改变任何调用方的可观察行为（全部"拿到即用"）。
 
-回归验证：**306 项端到端测试全部通过**，A/B 基准无指标回退。
+回归验证：**444 项端到端测试全部通过**，A/B 基准无指标回退。
 
 ---
 
@@ -502,17 +665,18 @@ async function recognizeByAzure(canvas) {
 **3. 接进分发**（六、翻译引擎）
 
 ```js
-async function recognizeAndTranslate(canvas) {
+async function recognizeAndTranslate(canvas, opts) {
     if (CFG.engine === 'youdao-img')   return await callYoudaoImage(canvasToJpeg(canvas, 0.9));
+    if (CFG.engine === 'browser-ai')   return await recognizeByBrowserAI(canvas, opts);
     if (CFG.engine === 'umi-ocr')      return await recognizeByUmi(canvas);
     if (CFG.engine === 'azure-vision') return await recognizeByAzure(canvas);
     return await translateByVision(canvasToJpeg(canvas, 0.85));
 }
 ```
 
-**4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS`），然后在 `UI.syncEngineUI()` 里控制其显隐。
+**4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS` 并把枚举值纳入 `sanitizeCfg()` 的兜底），然后在 `UI.syncEngineUI()` 里控制其显隐。
 
-**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 306 项测试仍然全绿。
+**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 444 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
 
 ---
 

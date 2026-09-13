@@ -1,14 +1,14 @@
 # 网页视频硬字幕实时翻译
 
 > 给任意网站上的 `<video>` 做「硬字幕」实时翻译：**框选字幕区 → 定时截图 → OCR / 多模态大模型 → 悬浮中文字幕**。
-> 浏览器端不需要下载任何模型，不依赖任何后端服务，一个用户脚本文件即装即用。
+> 不依赖任何后端服务，一个用户脚本文件即装即用；五种引擎里有四种无需浏览器下载模型（唯一会下载模型的「浏览器内置 AI」引擎，下载的是 Chrome 自带的端侧模型）。
 
 [![Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-595525-orange.svg)](https://greasyfork.org/zh-CN/scripts/595525)
-![version](https://img.shields.io/badge/version-1.11.1-blue.svg)
+![version](https://img.shields.io/badge/version-1.12.0-blue.svg)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
 ![runtime](https://img.shields.io/badge/runtime-Node.js%20%E2%89%A5%2022-brightgreen.svg)
-![tests](https://img.shields.io/badge/tests-306%20passed-success.svg)
+![tests](https://img.shields.io/badge/tests-444%20passed-success.svg)
 ![deps](https://img.shields.io/badge/dependencies-0-success.svg)
 
 ---
@@ -19,7 +19,7 @@
 - [效果预览](#效果预览)
 - [核心功能](#核心功能)
 - [工作原理](#工作原理)
-- [三种识别引擎](#三种识别引擎)
+- [五种识别引擎](#五种识别引擎)
 - [技术栈选型](#技术栈选型)
 - [环境配置步骤](#环境配置步骤)
 - [安装指南](#安装指南)
@@ -52,19 +52,20 @@
 | 外语公开课、技术演讲录像 | 字幕烧死在画面里，无法复制 | 框选字幕带，实时悬浮显示译文 |
 | 视频字幕轨是外语 | 平台不提供中文轨 | 同样适用（把字幕区框在字幕轨渲染的位置即可） |
 | 想批量翻译 | 传统方案要下载 ffmpeg、抽帧、跑本地 OCR | 浏览器内截图 + 云端 API，**零模型下载** |
+| 不想把画面发给云服务 / 没有 API Key | 云端方案必须联网、要密钥、按量计费 | 引擎切到「浏览器内置 AI」，识别与翻译全在本机完成，**不联网、不花钱** |
 
 ### 它不是什么
 
 - **不是字幕轨翻译器。** 如果你的视频本来就有可关闭的字幕轨（YouTube、B 站这类），请直接用专门读字幕轨的工具——体验更好、更准、更省钱。本脚本是给「字幕就画在画面上」的视频用的。
 - **不是视频下载器 / 去水印工具。**
-- **不内置任何 OCR 模型或翻译服务。** 识别与翻译能力全部来自你自己配置的 API（视觉大模型 / 本机 Umi-OCR / 有道智云），费用与配额由对应平台结算。
+- **不内置任何 OCR 模型或翻译服务。** 识别与翻译能力来自你自己配置的后端（视觉大模型 / 本机 Umi-OCR / 浏览器内置 AI / 有道智云），费用与配额由对应平台结算（浏览器内置 AI 免费）。
 
 ### 设计目标
 
 1. **通用**——`@match *://*/*`，任何网站都能用，不绑定特定站点。
 2. **不打扰**——页面上没有视频时只留一个右下角小胶囊；iframe 里没视频就完全不挂载；被禁用的站点彻底不介入。
 3. **省钱**——多重跳过机制（画面变化检测 + 边缘密度 + 文本相似度 + LRU 翻译缓存）把无效 API 调用压到最低。
-4. **零依赖**——主脚本是单文件原生 JS，没有构建步骤；测试套件只用 Node 内置模块，`npm install` 都不需要。
+4. **零依赖**——产物是单文件原生 JS，运行时零依赖、即装即用；源码按功能组件分放在 `src/` 下，构建只做**零依赖的纯文本拼接**（只用 Node 内置模块，`npm install` 都不需要），检测试套件同样如此。
 
 ---
 
@@ -96,9 +97,11 @@
 
 ### 识别与翻译
 
-- **三种识别引擎**，面板内一键切换（详见[三种识别引擎](#三种识别引擎)）：
+- **五种识别引擎**，面板内一键切换（详见[五种识别引擎](#五种识别引擎)）：
   - `openai-vision`（默认）——OpenAI 兼容的**视觉大模型**，一次 API 调用同时完成 OCR + 翻译。
   - `umi-ocr`——调用**本机运行的 Umi-OCR**（PaddleOCR 引擎，离线免费、识别率最高），再交给大模型翻译。
+  - `browser-ai`——**浏览器内置模型翻译**（Chrome 138+ / Edge）：识别可用 Umi-OCR 或端侧多模态读图，翻译走内置翻译模型。不要 API Key、不产生费用；Chrome 上是端侧模型（不联网），Edge 上 `ja→中文` 需开启「经英语中转」。
+  - `web-translate`——**免费网页接口翻译**：本机 Umi-OCR 识别 + 逆向复用翻译网站自己的前端接口（腾讯 / 彩云 / 必应），不要 API Key、不花钱。⚠️ 属非公开接口，见下文性质说明。
   - `youdao-img`——**有道智云图片翻译** API，OCR + 翻译一步到位。
 - **多平台预设**：Gemini、阿里云百炼（Qwen-VL）、智谱 GLM-4V、月之暗面 Kimi、OpenAI、OpenRouter、DeepSeek——选中即自动填入地址与模型。
 - **模型能力校验**：自动识别"不支持图片输入"的模型（如 `deepseek-v4-pro`、`gpt-3.5-turbo`）并提示，必要时自动切换到 Umi-OCR 引擎，避免配好了却一直报错。
@@ -128,7 +131,7 @@
 
 ### 工程与可维护性
 
-- **306 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
+- **444 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
 - **A/B 性能基准**工具：新旧两版交替跑、取中位数，输出逐项差异。
 - **零第三方依赖**：测试框架基于 Node 内置 WebSocket 直接驱动 Chrome DevTools Protocol。
 
@@ -150,10 +153,12 @@ flowchart TD
 
     F -->|"openai-vision"| G["视觉大模型<br/>一次调用完成 OCR + 翻译"]
     F -->|"umi-ocr"| H["本机 Umi-OCR 识别<br/>→ 大模型翻译"]
+    F -->|"browser-ai"| BAI["浏览器内置 AI（离线）<br/>本机识别 → 端侧模型翻译"]
     F -->|"youdao-img"| I["有道图片翻译 API"]
 
     G --> J{"文本相似度<br/>与上句比较"}
     H --> J
+    BAI --> J
     I --> J
 
     J -->|"相似：同一句"| KEEP["保持上一句字幕"]
@@ -198,19 +203,72 @@ sequenceDiagram
 
 ---
 
-## 三种识别引擎
+## 五种识别引擎
 
-| | `openai-vision`（默认） | `umi-ocr` | `youdao-img` |
-| --- | --- | --- | --- |
-| **原理** | 截图直接发给视觉大模型，一步完成 OCR + 翻译 | 本机 Umi-OCR（PaddleOCR）识别 → 文本交大模型翻译 | 有道智云图片翻译 API |
-| **API 调用次数** | 1 次 | 2 次（本地 OCR 不计费 + 1 次翻译） | 1 次 |
-| **费用** | 按 token 计费 | 仅翻译的 token 费用（OCR 免费本地跑） | 按量计费（非免费额度） |
-| **识别率** | 高（对描边字、艺术字尤其好） | **最高**（PaddleOCR 专精文字检测） | 高 |
-| **延迟** | 中 | 低（本地 OCR 很快） | 低 |
-| **需要** | 支持图片输入的模型 + API Key | 本机安装并运行 Umi-OCR，开启 HTTP 服务 | 有道智云 appKey / appSecret |
-| **适用** | 默认首选，配置最简单 | 追求最高识别率，或模型不支持图片 | 已有有道账号、想一步到位 |
+| | `openai-vision`（默认） | `umi-ocr` | `browser-ai` | `web-translate` | `youdao-img` |
+| --- | --- | --- | --- | --- | --- |
+| **原理** | 截图直接发给视觉大模型，一步完成 OCR + 翻译 | 本机 Umi-OCR（PaddleOCR）识别 → 文本交大模型翻译 | 本机识别（Umi-OCR 或端侧多模态读图）→ 浏览器内置模型翻译 | 本机 Umi-OCR 识别 → 逆向免费网页接口翻译 | 有道智云图片翻译 API |
+| **API 调用次数** | 1 次 | 2 次（本地 OCR 不计费 + 1 次翻译） | 0 次（全在本机） | 2 次（本地 OCR + 1 次免费接口） | 1 次 |
+| **费用** | 按 token 计费 | 仅翻译的 token 费用 | **完全免费** | **完全免费** | 按量计费（非免费额度） |
+| **联网** | 需要 | 需要（调用大模型时） | **Chrome 上不需要**；Edge 上实现不同 | 需要 | 需要 |
+| **稳定性** | 取决于供应商 | 取决于供应商 | 取决于浏览器版本 | ⚠️ **随时可能失效**（非公开接口） | 取决于供应商 |
+| **需要** | 支持图片输入的模型 + API Key | 本机 Umi-OCR | Chrome 138+ / Edge 148+、HTTPS 或 localhost | 本机 Umi-OCR | 有道 appKey / appSecret |
+| **适用** | 默认首选，配置最简单 | 追求最高识别率 | 想完全离线、不想填 Key | 不想填 Key 又愿意接受接口可能失效 | 已有有道账号 |
 
 > **注意**：`openai-vision` 必须选**支持图片输入**的模型。DeepSeek 侧统一用 `deepseek-flash`（支持图片）。选到纯文本模型时，面板会自动切换到 `umi-ocr` 引擎。
+
+### 关于 `browser-ai`（浏览器内置模型）
+
+直接用浏览器**自带**的模型完成翻译，不需要任何 API Key，也不产生任何费用：
+
+| 环节 | 两条路线（面板「识别方式」里选） |
+| --- | --- |
+| **识别** | `umi`：本机 Umi-OCR（推荐，识别率最高）<br>`builtin`：端侧多模态模型直接读图（零安装，识别率一般；**只有 Chrome 有**） |
+| **翻译** | `Translator`（端侧翻译模型，快、专为翻译训练）<br>语言对不可用时：经英语中转，或退回 `LanguageModel`（端侧大模型）文本翻译 |
+
+> ⚠️ **Chrome 和 Edge 不是同一套实现**，别把两者当成一回事：
+
+| | Chrome 138+ | Edge 145（实测） |
+| --- | --- | --- |
+| 模型位置 | 端侧模型（语言包下载到本机） | 同名 API，但是另一套实现；**是否完全本地未经证实**，不要把它当作隐私保证 |
+| `LanguageModel`（多模态大模型） | ✅ 有 | ❌ **没有** —— 「浏览器内置多读图」用不了，语言对一旦不支持也没有大模型可退 |
+| `Translator` 日语 → 中文 | 可用 | ❌ **必报** `UnknownError: Other generic failures occurred.`（`zh`/`zh-Hans`/`zh-Hant`/`zh-CN`/`zh-TW` 全试过，全挂） |
+| `Translator` 其他语言对 | 可用 | ✅ ja→en、ja→ko、ja→fr、en→zh 都正常 |
+
+**Edge 用户怎么办？** 勾上面板的「语言对不可用时经英语中转」即可：脚本会改走 `日语 → 英语 → 中文` —— 这两条腿在 Edge 上都是好的。代价是过两道翻译，语气和专有名词会比直连差一些（实测 `お腹の奥` 会变成「胃」、`Gスポット` 会变成「是个地方」），所以它**只在直连确认失败后才启用**（默认开启，可在面板关掉；关掉后会给出可操作的报错而不是静默失败）。想要直连质量就换 Chrome。
+
+> **纯拟声字幕会被模型「刷屏」** —— 这是端侧模型的通病，脚本已做压制：遇到「ああっああっああっ」这种输入，模型会失控地重复同一个片段（实测一句 18 字原文 → 971 字的 `Oh, oh, oh…` → 再过一遍变成 3613 字、耗时 5.6 秒）。现在 `baiCollapseRepeat()` 会把「同一短片段连续重复 5 次以上」压成两遍，正常句子一个字都不动，最终显示成「哦,哦」这样干净的短句。
+
+四条实测得出的硬约束（Chrome 153 / Edge 145）：
+
+1. **首次必须点一次「② 准备离线模型」**——模型下载只在**用户点击**的调用栈里被允许，主循环不会自己偷偷下载。
+2. **端侧模型声明支持的语言里没有中文**，所以要求它输出中文时不能写 `expectedOutputs`，只能靠提示词引导；多模态读图按**源语言**声明（日语可用，中文源语言请改用 Umi-OCR）。
+3. **跨域 iframe 默认用不了**这两个 API（Permissions Policy），而本脚本又常挂在播放器的 iframe 里——面板上的「① 检测浏览器 AI」会明确告诉你当前页行不行。
+4. **光看 `availability()` 判断不出语言对能不能用**：Edge 对 ja→中文会老实回 `downloadable`、`create()` 也成功，只有真去 `translate()` 才炸。所以「② 准备离线模型」会**真跑一句自检**，在用户手势还在的时候就把坏语言对试出来 —— 否则你会一直播到第一句字幕才发现。
+
+### 关于 `web-translate`（免费网页接口）
+
+**先说清楚性质，别用错了地方**（面板上也是这段）：
+
+- 这些是各家的**内部接口，不是公开 API**。服务条款上通常**不允许第三方直接调用**。
+- 随时可能改版、限流、封 IP。适合**个人自用、学习、小批量**；不要刷量，也不要用它做面向公众的服务。
+- 要稳定，请走官方 API（`openai-vision` / `youdao-img`）或本地模型（`browser-ai` / 本机大模型）。
+
+它只做**文本翻译**，识别仍由本机 Umi-OCR 负责 —— 所以引擎是「本机识别 + 免费在线翻译」的组合，**必须先装好 Umi-OCR 并开着 HTTP 服务**。
+
+| 接口 | 端点 | 特点 |
+| --- | --- | --- |
+| 腾讯交互翻译 | `transmart.qq.com/api/imt` | 纯 JSON、**无需任何鉴权**，最省事（降级链首位） |
+| 彩云小译 | `api.interpreter.caiyunai.com/v1/translator` | 用它前端里硬编码的公开 token；不接受 `auto` 源语言 |
+| 必应翻译 | `cn.bing.com/ttranslatev3` | 要抓页面里的 IG + token；token 会过期，脚本会自动重取 |
+
+实现里的几处关键处理：
+
+1. **语言码逐家映射**（`wtLangPair`）：同一门语言三家叫法不一样 —— 必应要 `auto-detect` / `zh-Hans`，彩云要 `ja2zh` 且不接受 `auto`，腾讯繁体用 `zh-TW`。不支持的组合直接跳过该引擎。
+2. **降级链**：默认「腾讯 → 彩云 → 必应」，前一个失败自动换下一个；三家全挂时错误里带上**每一家的原因**，不会只说一句"翻译失败"。面板上也可以锁定只用一个。
+3. **限速**（`wtMinInterval`，默认 1200ms）：同一引擎两次请求之间强制隔开，别把人家接口打挂 —— 也就不容易吃到限流。
+4. **必应 token 过期重取**：返回空 body 就是 token 失效，丢掉上下文重抓一次再翻。（实测 `www.bing.com` 会回 200 + **空 body**，所以固定用 `cn.bing.com`。）
+5. **「测试各接口」按钮**：三个接口各试一次并列出耗时与结果，不用靠猜谁还活着；每个引擎的成功/失败次数与最近错误也会进诊断报告。
 
 ### 引擎请求体示例
 
@@ -262,15 +320,18 @@ type=1&q=<base64>&from=auto&to=zh-CHS&appKey=…&salt=…&sign=…&signType=v3&c
 
 ### 为什么是原生 JS，而不是 React/Vue + 打包工具
 
-| 维度 | 原生 JS（本项目） | 框架 + 打包 |
+| 维度 | 原生 JS + 零依赖拼接（本项目） | 框架 + 打包 |
 | --- | --- | --- |
 | **安装体验** | 单个 `.user.js` 文件，Tampermonkey 里点一下就完事 | 需要构建产物、多文件加载、有时还要 CDN |
 | **页面隔离** | 完全注入页面上下文，无沙箱冲突 | 框架运行时可能与页面自身冲突 |
-| **体积** | ~200KB（含全部注释与 UI） | 运行时 + 组件库通常 ≥300KB |
-| **可审计性** | 用户能直接读懂每一行（这对用户脚本尤其重要） | 压缩混淆后难以审计 |
-| **维护成本** | 无构建、无依赖升级、无供应链风险 | 需要持续跟进依赖安全更新 |
+| **体积** | ~217KB（含全部注释与 UI） | 运行时 + 组件库通常 ≥300KB |
+| **可审计性** | 用户能直接读懂每一行：构建只是把 `src/` 的模块按顺序连起来，不重命名、不转译、不压缩 | 压缩混淆后难以审计 |
+| **维护成本** | 无第三方依赖、无供应链风险；源码可按功能组件分文件维护 | 需要持续跟进依赖安全更新 |
 
-用户脚本的核心价值是**可读、可审计、即装即用**，引入构建链会直接损害这三点。
+用户脚本的核心价值是**可读、可审计、即装即用**。本项目因此只保留一条零依赖的拼接构建
+（`npm run build`，见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#源码结构与构建)）：
+它不是"构建链"，而是把分文件的源码还原成必须单文件的产物 —— 装到 Tampermonkey 里
+依然只是一个文件，用户侧的一切承诺不变。
 
 ### 选型明细
 
@@ -311,7 +372,7 @@ type=1&q=<base64>&from=auto&to=zh-CHS&appKey=…&salt=…&sign=…&signType=v3&c
 
 ### 2. 一个可用的识别 / 翻译服务
 
-三选一（可随时在面板切换）：
+五选一（可随时在面板切换）：
 
 **A. OpenAI 兼容的视觉大模型（推荐，最省事）**
 
@@ -326,11 +387,25 @@ type=1&q=<base64>&from=auto&to=zh-CHS&appKey=…&salt=…&sign=…&signType=v3&c
 3. 在面板选择引擎「Umi-OCR 本地识别」，点「测试连接」确认能识别出文字
 4. 仍需要一个文本大模型来做翻译（Umi-OCR 只负责认字）
 
-**C. 有道智云图片翻译**
+**C. 浏览器内置模型（不要 Key，Chrome 上完全离线）**
+
+1. 用 **Chrome 138+ 桌面版**打开页面（Edge 也支持，但见下面的注意），且页面是 HTTPS 或 localhost
+2. 面板引擎选「浏览器内置 AI」→ 点「① 检测浏览器 AI」确认支持情况
+3. 点「② 准备离线模型」，等语言包下载完成并看到「自检通过」（只需一次，之后一直可用）
+4. 识别方式建议配 Umi-OCR；不想装软件就选「浏览器内置多模态读图」（**只有 Chrome 有**）
+5. **Edge 用户注意**：Edge 没有多模态大模型，且内置翻译对「日语 → 中文」必报 `Generic failures`。面板上默认勾着「语言对不可用时经英语中转」，会自动改走 `日语 → 英语 → 中文`；想要直连质量请改用 Chrome。
+
+**D. 有道智云图片翻译**
 
 1. 在 <https://ai.youdao.com/> 创建应用，获取 **appKey**（应用 ID）与 **appSecret**（应用密钥）
 2. 在面板填入，选择引擎「有道图片翻译」
 3. 注意：该项**按量计费**，不是免费额度
+
+**E. 免费网页接口（不要 Key，但接口随时可能失效）**
+
+1. 先按上面的 **B** 装好并运行 Umi-OCR（识别靠它）
+2. 引擎选「免费网页接口」→ 点「测试各接口」看谁还活着
+3. ⚠️ 用的是各家**内部接口**，不是公开 API，服务条款上通常不允许第三方调用；仅建议个人自用，不要刷量
 
 ### 3. 运行测试与基准（仅开发需要）
 
@@ -405,11 +480,19 @@ https://raw.githubusercontent.com/1105532539/video-hardsub-translator/main/video
 git clone https://github.com/1105532539/video-hardsub-translator.git
 cd video-hardsub-translator
 
-# 主脚本就是仓库根目录下的单个文件，无需构建
+# 源码在 src/ 下，按功能组件分模块；改完重新拼出根目录的产物
+npm run build              # 零依赖拼接（只用 Node 内置模块）
+npm run build:check        # 只校验产物与 src/ 是否一致（提交前用）
+
 # 运行测试（需要 Node ≥ 22 与本机 Chrome）
+npm test                   # 全部 6 个套件；会自动先跑一次 npm run build
 node _test/engine.mjs      # 引擎层：请求体 / 响应解析 / 错误提示
 node _test/smoke-panel.mjs # 面板冒烟：挂载 / 预设 / 导入导出 / 诊断
 ```
+
+> ⚠️ **不要直接编辑**根目录的 `video-hardsub-translator.user.js` —— 它是构建产物，
+> 改了会被下次构建覆盖。请改 `src/` 里对应的模块（模块分工见
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#模块地图)）。
 
 ### 安装后首次配置
 
@@ -493,7 +576,7 @@ node _test/smoke-panel.mjs # 面板冒烟：挂载 / 预设 / 导入导出 / 诊
 
 | 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `engine` | `string` | `openai-vision` | 识别引擎：`openai-vision` / `umi-ocr` / `youdao-img` |
+| `engine` | `string` | `openai-vision` | 识别引擎：`openai-vision` / `umi-ocr` / `browser-ai` / `web-translate` / `youdao-img` |
 | `apiBase` | `string` | `https://api.deepseek.com` | OpenAI 兼容接口地址（结尾不要带 `/`） |
 | `apiKey` | `string` | `""` | API Key |
 | `model` | `string` | `deepseek-flash` | 模型名（`openai-vision` 必须支持图片） |
@@ -518,6 +601,26 @@ node _test/smoke-panel.mjs # 面板冒烟：挂载 / 预设 / 导入导出 / 诊
 | `umiBase` | `string` | `http://127.0.0.1:1224` | Umi-OCR HTTP 服务地址 |
 | `umiLang` | `string` | `models/config_japan.txt` | 识别语言配置文件 |
 | `umiParser` | `string` | `single_none` | 排版解析器；`single_none` = 单栏无换行（适合单行字幕） |
+
+### 浏览器内置 AI（`engine = browser-ai`）
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `baiOcr` | `string` | `umi` | 识别方式：`umi` = Umi-OCR 本机识别（推荐）/ `builtin` = 端侧多模态读图 |
+| `baiTrans` | `string` | `auto` | 翻译方式：`auto` 优先端侧翻译模型、不支持则用端侧大模型 / `translator` 只用翻译模型 / `prompt` 只用端侧大模型 |
+| `baiStream` | `boolean` | `true` | 边生成边出字（个别页面上觉得闪烁可关掉） |
+| `baiPivot` | `boolean` | `true` | 语言对直连失败时经英语中转（**Edge 的 `日语 → 中文` 必须开这个**）。关掉后会直接报错 |
+
+`browser-ai` 不需要 `apiBase` / `apiKey` / `model`，语言方向由下面的 `srcLang` / `tgtLang` 按语言名映射成 BCP-47 标签（日语→`ja`、简体中文→`zh`）。
+
+### 免费网页接口（`engine = web-translate`）
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `wtEngine` | `string` | `auto` | 翻译接口：`auto` 按降级链 / `tencent` / `caiyun` / `bing` |
+| `wtMinInterval` | `number` | `1200` | 同一引擎两次请求的最小间隔(ms)，范围 0–10000；调大更不容易被限流 |
+
+同样不需要 `apiBase` / `apiKey`；识别复用上面的 Umi-OCR 配置（`umiBase` / `umiLang`）。⚠️ 用的是**非公开接口**，随时可能失效。
 
 ### 语言
 
@@ -601,12 +704,42 @@ console.log(H.Diag.build());
 
 ```text
 video-hardsub-translator/
-├── video-hardsub-translator.user.js   # ★ 主脚本（单文件，无构建，即装即用）
+├── video-hardsub-translator.user.js   # ★ 构建产物（单文件，即装即用；由 src/ 拼接而来，请勿直接编辑）
+├── src/                               # ★ 源码：按功能组件分模块（文件名前缀的数字就是拼接顺序）
+│   ├── 00-header.js                   #   用户脚本元数据块（==UserScript==）与总说明
+│   ├── 10-config.js                   #   配置：默认值、读写、规整、平台预设、模型能力判定
+│   ├── 12-log.js                      #   日志
+│   ├── 14-constants.js                #   热路径常量与状态栏配色
+│   ├── 20-video.js                    #   视频元素定位
+│   ├── 22-site.js                     #   站点级行为：禁用开关、视频出现监听、按站点记忆区域
+│   ├── 24-region.js                   #   区域锚定与坐标换算
+│   ├── 30-image.js                    #   截图分析与文本相似度（热路径）
+│   ├── 32-util.js                     #   通用小工具
+│   ├── 40-http.js                     #   GM_xmlhttpRequest 封装
+│   ├── 42-youdao-sign.js              #   SHA-256、UUID 与有道错误码
+│   ├── 44-umi-ocr.js                  #   Umi-OCR 本机识别
+│   ├── 46-youdao-image.js             #   有道图片翻译
+│   ├── 48-browser-ai.js               #   浏览器内置 AI（完全离线）：能力探测、端侧翻译、多模态读图
+│   ├── 49-web-translate.js            #   免费网页接口（逆向）：降级链、限速、token 重取
+│   ├── 50-capturer.js                 #   截图器（element / display 双后端）
+│   ├── 60-chat.js                     #   OpenAI 兼容接口与翻译缓存
+│   ├── 62-engines.js                  #   五种引擎的统一入口
+│   ├── 70-pipeline.js                 #   主循环
+│   ├── 80-overlay.js                  #   悬浮字幕层
+│   ├── 82-fullscreen.js               #   全屏适配
+│   ├── 84-html.js                     #   HTML 转义、Trusted Types、颜色
+│   ├── 86-selector.js                 #   区域框选器
+│   ├── 88-diag.js                     #   诊断模式
+│   ├── 90-panel-html.js               #   控制面板：HTML 骨架
+│   ├── 92-panel-css.js                #   控制面板：样式表
+│   ├── 94-modal.js                    #   通用弹窗骨架
+│   ├── 96-panel-ui.js                 #   控制面板：控件绑定、配置档案、导入导出
+│   └── 98-boot.js                     #   启动装配
 ├── README.md                          # 项目说明（本文件）
 ├── LICENSE                            # GPL-3.0 许可证全文
 ├── CHANGELOG.md                       # 版本更新日志
 ├── CONTRIBUTING.md                    # 贡献指南
-├── package.json                       # 仅用于声明测试脚本入口（无第三方依赖）
+├── package.json                       # 声明构建 / 测试脚本入口（无第三方依赖）
 ├── .gitignore                         # 排除本地快照 / 调试脚本 / 测试中间产物 / 凭据
 │
 ├── .github/
@@ -621,9 +754,14 @@ video-hardsub-translator/
 │   ├── TESTING.md                     # 测试与性能基准指南
 │   └── local-ocr-design.md            # 本地 OCR 方案设计笔记
 │
-└── _test/                             # 端到端测试套件（零依赖，CDP 驱动真实 Chrome）
+├── _build/                            # 构建（零依赖：只用 Node 内置模块）
+│   └── build.mjs                      #   按编号顺序拼接 src/ → 根目录产物 + 完整性校验
+│
+└── _test/                             # 端到端测试套件（零依赖，CDP 驱动真实 Chrome；测的是根目录产物）
     ├── cdp.mjs                        # 零依赖 CDP 封装（内置 WebSocket 驱动 Chrome）
     ├── engine.mjs                     # 引擎层：请求体 / 响应解析 / 错误提示
+    ├── browser-ai.mjs                 # 浏览器内置 AI 离线引擎（内置 AI 用替身）
+    ├── web-translate.mjs              # 免费网页接口（三家用 GM 桩模拟）
     ├── opt.mjs                        # 优化批次专项测试
     ├── allsite.mjs                    # 全站运行行为（该出现的才出现）
     ├── smoke-panel.mjs                # 面板冒烟 + 配置持久化
@@ -643,26 +781,31 @@ video-hardsub-translator/
     └── shots/                         # 截图产物（README 引用）
 ```
 
-### 主脚本内部结构
+### 源码结构（`src/`）
 
-`video-hardsub-translator.user.js` 按职责分为 12 个编号章节，便于定位：
+源码按功能组件分成 29 个模块，**文件名前缀的两位数字就是拼接顺序**，后文可以依赖前文。
+每个模块头部都写明了「对外提供」与「依赖」，构建脚本会逐个核对这些声明。
 
-| 章节 | 内容 |
+| 模块 | 内容 |
 | --- | --- |
-| 一、配置 | 默认值、加载/校验/持久化、平台预设、模型能力判定 |
-| 二、日志 | 统一前缀的 `log` / `warn` |
-| 三、工具函数 | 视频查找、几何推算、区域锚点、缩略图、边缘密度、相似度 |
-| 四、HTTP | `GM_xmlhttpRequest` Promise 封装、SHA-256、Umi-OCR、有道 |
-| 五、截图器 | `element` / `display` 双后端、裁切缩放、污染处理 |
-| 六、翻译引擎 | 缓存、请求体构造、响应解析、三引擎分发 |
-| 七、主循环 | `Pipeline`：定时、跳过判定、错误恢复、统计 |
-| 八、字幕悬浮层 | `Overlay`：定位、样式、全屏搬移 |
-| 九、区域框选器 | `RegionSelector`：拖拽框选、实时预览 |
-| 十、诊断模式 | `Diag`：记录、报告生成、区域对齐检查 |
-| 十一、控制面板 UI | `UI`：面板构建、控件绑定、配置档案、导入导出 |
-| 十二、启动 | 挂载策略、视频监听、SPA 路由轮询、油猴菜单 |
+| `10-config` | 默认值、加载/校验/持久化、平台预设、模型能力判定 |
+| `12-log` / `14-constants` | 统一前缀的 `log` / `warn`；热路径阈值与配色 |
+| `20-video` / `22-site` / `24-region` | 视频查找、站点级开关与按站点记忆区域、区域锚定换算 |
+| `30-image` / `32-util` | 缩略图 / 边缘密度 / 相似度；纯计算小工具 |
+| `40-http` / `42-youdao-sign` | `GM_xmlhttpRequest` 封装；SHA-256 与有道错误码 |
+| `44-umi-ocr` / `46-youdao-image` | Umi-OCR 本机识别；有道图片翻译 |
+| `48-browser-ai` | 浏览器内置 AI（完全离线）：能力探测、端侧翻译、多模态读图、流式 |
+| `49-web-translate` | 免费网页接口（逆向）：语言码映射、降级链、限速、token 重取、测活 |
+| `50-capturer` | `element` / `display` 双后端、裁切缩放、污染处理 |
+| `60-chat` / `62-engines` | 缓存、请求体构造、响应解析；五引擎分发 |
+| `70-pipeline` | `Pipeline`：定时、跳过判定、错误恢复、统计 |
+| `80-overlay` / `82-fullscreen` | 字幕渲染定位；全屏搬移与原生字幕轨回退 |
+| `84-html` / `86-selector` / `88-diag` | Trusted Types 兼容层；框选器；诊断模式 |
+| `90`–`96-panel-*` | 面板骨架 / 样式 / 弹窗骨架 / `UI` 行为 |
+| `98-boot` | 挂载策略、视频监听、SPA 路由轮询、油猴菜单 |
 
-详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+构建、模块化规则与已知边界详见
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#源码结构与构建)。
 
 ---
 
@@ -674,6 +817,8 @@ video-hardsub-translator/
 
 ```bash
 node _test/engine.mjs        # 50 项  引擎协议：请求体、思考模式参数、响应解析、错误提示
+node _test/browser-ai.mjs    # 94 项  浏览器内置 AI 离线引擎：语言映射、探测、全离线链路、流式、经英语中转
+node _test/web-translate.mjs # 44 项  免费网页接口：语言码映射、降级链、token 重取、限速、缓存、测活
 node _test/opt.mjs           # 76 项  专项：模型能力判定、缓存、区域锚点、UI 交互
 node _test/allsite.mjs       # 37 项  全站策略：无视频只留胶囊、iframe 不污染、本站禁用
 node _test/smoke-panel.mjs   # 79 项  面板冒烟：挂载、预设、档案、导入导出、诊断
@@ -681,7 +826,7 @@ node _test/layout.mjs        # 33 项  布局几何：面板在视口内、控�
 node _test/fullscreen.mjs    # 31 项  全屏：UI 搬进全屏容器、原生字幕轨回退
 ```
 
-当前状态：**306 / 306 全部通过**。
+当前状态：**444 / 444 全部通过**。
 
 ### 性能基准
 
@@ -709,6 +854,60 @@ v1.11.0 优化轮次的实测结果（各 3 轮取中位数）：
 ---
 
 ## 常见问题
+
+<details>
+<summary><b>「免费网页接口」报错说全部失败</b></summary>
+
+先点面板上的「**测试各接口**」，它会逐个跑一遍并告诉你谁还活着、耗时多少、报什么错。常见原因：
+
+- **对方改版了**：逆向接口没有兼容性承诺，页面结构一变（比如必应抓不到 IG / token）就失效。诊断报告里会留下每一家最近一次的错误原因。
+- **被限流 / 封 IP**：把「最小请求间隔」调大（比如 2000–3000ms），或换一个接口。
+- **本机 Umi-OCR 没开**：这个引擎只做翻译，识别靠 Umi-OCR —— 它会报「连不上本机 Umi-OCR」，先去把 Umi-OCR 的 HTTP 服务打开。
+- **源语言填了 `auto` 又锁定了彩云**：彩云不接受 `auto`，locked 到它时会直接跳过；改用「自动降级」或换接口。
+
+要长期稳定，请改用 `openai-vision` / `youdao-img`（官方 API）或 `browser-ai`（浏览器内置模型）。
+
+</details>
+
+<details>
+<summary><b>Edge 上「日语 → 中文」报 <code>Other generic failures occurred.</code></b></summary>
+
+这是 **Edge 内置翻译自己的问题**，不是脚本的问题。实测（Edge 145）：
+
+- `Translator.availability({ja, zh})` 会老实回答 `downloadable`，`create()` 也成功，**只有真去 `translate()` 才抛** `UnknownError: Other generic failures occurred.`；
+- 换语言标签也没用：`zh` / `zh-Hans` / `zh-Hant` / `zh-CN` / `zh-TW` / `ja-JP→zh` 全挂；
+- 但同一台机器上 `ja→en`、`ja→ko`、`ja→fr`、`en→zh` 都是好的 —— **坏的只是 `ja→中文` 这一个语言对**。
+
+**怎么办（任选其一）**：
+
+1. **勾上面板的「语言对不可用时经英语中转」**（默认已勾），脚本会改走 `日语 → 英语 → 中文`，两条腿在 Edge 上都能用；代价是过两道翻译、质量略降。
+2. **改用 Chrome**：Chrome 的内置翻译是端侧模型，`ja→zh` 直连可用，质量也更好。
+3. **换引擎**：`Umi-OCR + 大模型 API`（识别率最高）或 `视觉大模型`。
+
+> 面板上的「② 准备离线模型」会**真跑一句自检**，就是专门为了在开播前发现这种情况 —— 否则你要等到第一句字幕才看到报错。
+
+</details>
+
+<details>
+<summary><b>「浏览器内置 AI」报错要我先点「准备离线模型」</b></summary>
+
+端侧模型的下载**只允许发生在用户点击的调用栈里**（浏览器限制），脚本不会在后台偷偷下载。点一次面板上的「② 准备离线模型」，等进度条走完即可，之后一直离线可用。
+
+若点「① 检测浏览器 AI」就发现 `Translator` / `LanguageModel` 是「不支持」，常见原因有四个：浏览器不是 Chrome 138+ 桌面版（移动端、Firefox、Safari 都不支持）；页面不是 HTTPS / localhost；**视频在跨域 iframe 里**（浏览器默认不给这种框架开放内置 AI，请把视频页面单独打开）；或者用户脚本管理器的**沙箱注入模式**把页面 API 挡在了外面（Tampermonkey：设置 → 配置模式 → 注入模式，改成 `Page`/`立即` 试试）。脚本对内置 AI 的取用全部做了兜底，取不到只会提示「不支持」，不会报错崩掉。
+
+</details>
+
+<details>
+<summary><b>「浏览器内置 AI」提示不支持当前语言对</b></summary>
+
+端侧模型能声明的语言有限（Chrome 153 实测：`en` / `ja` / `fr` / `de` / `es` 可用，`zh` / `ko` / `ru` 等不可用）。因此：
+
+- 翻译方向是**日语 → 中文**时，`Translator` 直连本来可用（Edge 除外，见上一条），中转开关会自动接管 Edge 的情况；
+- 「翻译方式」选 `auto` 会在语言对不支持时依次尝试：经英语中转 → 端侧大模型（Prompt API）；
+- 「识别方式」选「浏览器内置多模态读图」时，**源语言必须是端侧模型支持的语言**（日语可以，中文不行）——中文源语言请改用 Umi-OCR 识别；
+- **Edge 根本没有 Prompt API**，所以上面那些兜底在 Edge 上只剩「经英语中转」一条。
+
+</details>
 
 <details>
 <summary><b>面板一直显示「未检测到文字，跳过」</b></summary>
@@ -829,7 +1028,7 @@ node _test/layout.mjs
 node _test/fullscreen.mjs
 ```
 
-**306 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
+**444 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
 
 ---
 

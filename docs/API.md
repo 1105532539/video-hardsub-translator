@@ -1,7 +1,7 @@
 # 接口文档
 
 > 本文档分三部分：脚本**对外调用**的第三方 API、脚本**对外暴露**的内部 JS API，
-> 以及贯穿全局的数据结构。以 `video-hardsub-translator.user.js` v1.11.1 为准。
+> 以及贯穿全局的数据结构。以 `video-hardsub-translator.user.js` v1.12.0 为准。
 
 ---
 
@@ -11,6 +11,8 @@
   - [1.1 OpenAI 兼容对话接口（openai-vision）](#11-openai-兼容对话接口openai-vision)
   - [1.2 Umi-OCR HTTP 接口（umi-ocr）](#12-umi-ocr-http-接口umi-ocr)
   - [1.3 有道图片翻译（youdao-img）](#13-有道图片翻译youdao-img)
+  - [1.4 浏览器内置 AI（browser-ai）](#14-浏览器内置-aibrowser-ai)
+  - [1.5 免费网页接口（web-translate）](#15-免费网页接口web-translate)
 - [二、内部 JS API（window.\_\_H1SUB\_\_）](#二内部-js-apiwindow__h1sub__)
 - [三、数据结构](#三数据结构)
 - [四、GM 存储键](#四gm-存储键)
@@ -19,6 +21,9 @@
 ---
 
 ## 一、第三方 API
+
+> 「浏览器内置 AI（`browser-ai`）」引擎不调用任何第三方接口，见 [1.4](#14-浏览器内置-aibrowser-ai)；
+> 「免费网页接口（`web-translate`）」调用的是各家内部接口，见 [1.5](#15-免费网页接口web-translate)。
 
 ### 1.1 OpenAI 兼容对话接口（openai-vision）
 
@@ -369,13 +374,88 @@ curl https://openapi.youdao.com/ocrtransapi \
 
 ---
 
+### 1.4 浏览器内置 AI（browser-ai）
+
+完全不发网络请求：识别在本机（Umi-OCR 或端侧多模态模型），翻译也由浏览器**自带**的端侧模型完成。要求 Chrome 138+ 桌面版（或 Edge）、页面为 HTTPS 或 localhost、且不是跨域 iframe（Permissions Policy 限制，顶层窗口与同源 iframe 才有）。
+
+用到的两个 Web API 全局对象（脚本一律通过 `window[...]` 取值，因为不支持时它们是**未声明标识符**，直接写名字会抛 `ReferenceError`）：
+
+| API | 用途 | 关键成员 |
+| --- | --- | --- |
+| `Translator` | 端侧**翻译**模型 | `availability({sourceLanguage, targetLanguage})`、`create(opts)`；实例 `translate(text)` / `translateStreaming(text)` / `destroy()` |
+| `LanguageModel` | 端侧大模型（Prompt API），可读图 | `availability(opts)`、`create(opts)`；实例 `prompt(input)` / `promptStreaming(input)` / `destroy()` |
+| `LanguageDetector` | 语种检测（可选） | 仅用于探测展示 |
+
+#### 调用形态
+
+```js
+// 翻译：语言标签必须是 BCP-47（脚本负责从「日语 / 简体中文」映射过来）
+const t = await Translator.create({ sourceLanguage: 'ja', targetLanguage: 'zh' });
+await t.translate('おはようございます');
+
+// 多模态读图：图片必须是 user 消息里的内容块，值可以是 Blob / canvas 等 ImageBitmapSource
+const s = await LanguageModel.create({
+  expectedInputs: [{ type: 'text', languages: ['ja'] }, { type: 'image' }],
+  initialPrompts: [{ role: 'system', content: '你是视频字幕 OCR 引擎…' }],
+});
+await s.prompt([{
+  role: 'user',
+  content: [
+    { type: 'text', value: '请把这张字幕截图里的文字原样抄出来。' },
+    { type: 'image', value: blob },
+  ],
+}]);
+```
+
+#### 实测约束（Chrome 153）
+
+| 约束 | 表现 | 脚本的处理 |
+| --- | --- | --- |
+| 下载要在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 下载只由面板「② 准备离线模型」触发 |
+| 端侧模型声明语言没有中文 | `expectedOutputs: [{type:'text', languages:['zh']}]` → `unavailable`（`en`/`ja`/`fr`/`de`/`es` 可用） | 输出中文时不写 `expectedOutputs`；读图按源语言声明 |
+| 跨域 iframe 不可用 | `availability()` 抛错或返回 `unavailable` | `baiFrameNote()` 提前探测并给出提示 |
+| 流式分片语义未定 | 现为**累计**文本，规范讨论过改**增量** | `baiJoinChunk()` 两种都认 |
+
+`availability()` 的返回值：`available`（已就绪）/ `downloadable`（需下载）/ `downloading`（下载中）/ `unavailable`（不支持）；脚本另外用 `unsupported`（没有这个 API）与 `error`（探测抛错）两种内部值。
+
+---
+
+### 1.5 免费网页接口（web-translate）
+
+⚠️ **这一节是逆向来的内部接口，不是公开 API**：服务条款上通常不允许第三方直接调用，且随时可能改版 / 限流 / 封 IP。仅建议个人自用。只做**文本翻译**，识别由本机 Umi-OCR 负责。全部经 `GM_xmlhttpRequest` 发出（绕开 CORS）。
+
+| 引擎 | 端点 | 鉴权 | 请求 | 取译文 |
+| --- | --- | --- | --- | --- |
+| `tencent` | `POST https://transmart.qq.com/api/imt` | **无** | JSON：`{header:{fn:'auto_translation',client_key}, type:'plain', model_category:'normal', source:{lang,text_list:[text]}, target:{lang}}` | `header.ret_code === 'succ'` 且 `auto_translation[0]` |
+| `caiyun` | `POST https://api.interpreter.caiyunai.com/v1/translator` | 前端公开 token（`x-authorization: token …`） | JSON：`{source:[text], trans_type:'ja2zh', request_id, detect:true}` | `rc === 0` 且 `target[0]` |
+| `bing` | `GET https://cn.bing.com/translator` → `POST https://cn.bing.com/ttranslatev3?isVertical=1&IG=…&IID=translator.5028` | 页面里的 `IG` + `params_AbusePreventionHelper`（token / key），与 cookie 绑定 | 表单：`fromLang / text / to / token / key` | `[0].translations[0].text`；**空 body = token 过期**，需重抓页面 |
+
+#### 语言码映射（`wtLangPair`）
+
+同一门语言三家叫法不同，这一层是让「一个接口吃所有引擎」成立的关键：
+
+| 规范码 | `tencent` | `caiyun` | `bing` |
+| --- | --- | --- | --- |
+| `auto` | `auto` | ❌ 不支持（返回 `null`，跳过该引擎） | `auto-detect` |
+| `zh` | `zh` | `zh` | `zh-Hans` |
+| `zh-Hant` | `zh-TW` | `zh`（它只有这一个中文标签） | `zh-Hant` |
+| 其它 | 原样 | 原样 + `trans_type = src2tgt` | 原样 |
+
+#### 实测注意（2026-09）
+
+- `www.bing.com` 的 `ttranslatev3` 会回 **200 + 空 body**，必须用 `cn.bing.com`。
+- `tencent` 与 `bing` 都**不校验 Referer**，所以油猴里不必伪造来源头（脚本仍带上 Referent 以便贴近真实调用）。
+- `caiyun` 的 token 硬编码在它自己前端里，哪天被撤就废。
+
+---
+
 ## 二、内部 JS API（`window.__H1SUB__`）
 
 脚本挂载后会把内部对象暴露到页面全局，**供自动化测试与二次开发使用**。它不影响正常运行，且可安全只读访问。
 
 ```js
 const H = window.__H1SUB__;
-H.version;              // '1.11.1'
+H.version;              // '1.12.0'
 ```
 
 > 该接口是**调试/测试用途**，不保证跨版本稳定；正式集成请以用户脚本本身为准。
@@ -419,7 +499,8 @@ H.version;              // '1.11.1'
 
 | 函数 | 签名 | 说明 |
 | --- | --- | --- |
-| `findVideo()` | `→ HTMLVideoElement\|null` | 页面上面积最大的、≥200×120 的视频 |
+| `findVideo()` | `→ HTMLVideoElement\|null` | 页面上面积最大的、≥200×120 的视频。带 200ms TTL 缓存（`el.isConnected` 兜底），高频调用不会反复触发强制重排 |
+| `invalidateFindVideoCache()` | `→ void` | 立刻作废上面那个缓存，让下次 `findVideo()` 必然重扫。SPA 路由切换时内部已调用 |
 | `getContentBox(video)` | `→ {left,top,width,height}` | 剔除 `object-fit` 留白后的**真实画面区** |
 | `anchorRegion(x, y, w, h, video)` | `→ region` | 把页面坐标转成带画面区快照的锚点结构 |
 | `resolveRegion(region, video?, knownBox?)` | `→ region` | 按当前画面区重新投影区域 |
@@ -432,7 +513,7 @@ H.version;              // '1.11.1'
 
 | 函数 | 签名 | 说明 |
 | --- | --- | --- |
-| `recognizeAndTranslate(canvas)` | `async → {original, translation}` | **统一入口**，按 `CFG.engine` 分发 |
+| `recognizeAndTranslate(canvas, opts?)` | `async → {original, translation}` | **统一入口**，按 `CFG.engine` 分发；`opts.onDelta(累计译文, 原文)` 供流式显示 |
 | `translateByVision(dataUrl)` | `async → {original, translation}` | 视觉大模型（一步） |
 | `translateText(text)` | `async → string` | 纯文本翻译（带 LRU 缓存） |
 | `recognizeByUmi(canvas)` | `async → {original, translation}` | Umi-OCR 识别 + 大模型翻译 |
@@ -440,6 +521,26 @@ H.version;              // '1.11.1'
 | `umiProbe()` | `async → object` | 探测 Umi-OCR（面板「测试连接」） |
 | `umiBase()` | `→ string` | 规范化后的 Umi-OCR 地址 |
 | `callYoudaoImage(dataUrl)` | `async → {original, translation}` | 有道图片翻译 |
+| `recognizeByBrowserAI(canvas, opts?)` | `async → {original, translation}` | 浏览器内置 AI 离线引擎（识别 + 端侧翻译） |
+| `baiTranslate(text, {onDelta}?)` | `async → string` | 只用端侧模型翻译一句（带缓存与会话复用） |
+| `baiOcrByBuiltin(canvas)` | `async → string` | 端侧多模态读图，返回识别出的原文 |
+| `baiPrepare(onProgress?)` | `async → string[]` | 建好/下载端侧会话**并真跑一句自检**。**必须在用户点击的调用栈里调用** |
+| `baiProbe()` | `async → Array<{label,value,kind}>` | 探测内置 AI（面板「检测浏览器 AI」） |
+| `baiReset()` | `→ void` | 销毁全部端侧会话（换语言 / 换模式时用） |
+| `baiSupport()` | `→ {translator, lm, detector}` | 三个内置 API 是否存在 |
+| `langCode(name)` | `→ string` | 「日语」→ `ja`；认不出来返回 `''`（映射表在 `32-util.js`，浏览器内置 AI 与免费网页接口共用） |
+| `baiPair()` | `→ {src,tgt} \| null` | 当前语言方向（由 `srcLang` / `tgtLang` 映射） |
+| `baiPairKey(pair)` | `→ string` | 语言对的规范键，如 `'ja>zh'` |
+| `baiMayPivot(pair)` | `→ boolean` | 这个语言对能不能经英语中转 |
+| `baiIsPairFailure(e)` | `→ boolean` | 这个错误是不是"语言对本身不可用" |
+| `baiBrokenPairs` | `{ 'ja>zh': '错误原文' }` | 运行时试出来的坏语言对（只读观察用） |
+| `baiJoinChunk(acc, chunk)` | `→ string` | 拼接流式分片（累计式与增量式都认） |
+| `wtTranslate(text)` | `async → string` | 免费网页接口翻译（按降级链逐个试） |
+| `wtSelftest()` | `async → Array<{id,label,ok,out?,err?,ms}>` | 三个接口各试一次（面板「测试各接口」） |
+| `wtLangPair(id, src, tgt)` | `→ object \| null` | 某家引擎的语言码映射；`null` = 这家用不了该语言对 |
+| `wtOrder()` | `→ string[]` | 当前的降级链顺序 |
+| `wtStats` / `wtReset()` | `{id:{ok,fail,lastError}}` / `→ void` | 各家成败统计（进诊断报告）/ 重置限速与 token 上下文 |
+| `recognizeByWebTranslate(canvas)` | `async → {original, translation}` | Umi-OCR 识别 + 免费接口翻译 |
 | `callChat(body)` / `callChatCore(body)` | `async → string \| object` | OpenAI 兼容调用（后者返回 `{text, usage, finishReason, model}`） |
 | `apiUrl()` / `buildChatBody()` / `shouldDisableThinking()` | `→ …` | 请求构造辅助 |
 | `extractContent(message, finishReason)` | `→ string` | 响应正文提取 |
@@ -599,7 +700,9 @@ h1sub.apiProfiles     h1sub.youdaoAppKey    h1sub.youdaoAppSecret
 h1sub.youdaoFrom      h1sub.youdaoTo        h1sub.youdaoLLM
 h1sub.umiBase         h1sub.umiLang         h1sub.umiParser
 h1sub.srcLang         h1sub.tgtLang         h1sub.extraPrompt
-h1sub.interval        h1sub.captureMode     h1sub.smartSkip
+h1sub.baiOcr          h1sub.baiTrans        h1sub.baiStream
+h1sub.baiPivot        h1sub.interval        h1sub.captureMode
+h1sub.smartSkip       h1sub.wtEngine        h1sub.wtMinInterval
 h1sub.textSimThreshold h1sub.region         h1sub.regionHost
 h1sub.regionsByHost   h1sub.disabledHosts   h1sub.onboarded
 h1sub.fontSize        h1sub.showOriginal    h1sub.overlayTop
