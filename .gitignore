@@ -58,3 +58,6 @@ desktop.ini
 *.log
 node_modules/
 npm-debug.log*
+
+# 从 docs/greasyfork-listing.md 抽出的「发布正文」，供手工粘贴到 Greasy Fork
+/_greasyfork-paste.md
