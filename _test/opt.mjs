@@ -1000,6 +1000,442 @@ try {
         JSON.stringify({ up: afterFrame.noKey.region, down: afterFrame.withKey.region }));
 
     // ─────────────────────────────────────────────
+    S('12b. 省钱：静帧 + 空结果不再重复识别（P0-1）');
+
+    // 这条盯的是本批修掉的一个真实漏钱点：
+    //   判据原本是 `noChange && lastOriginal`，而识别结果为空时 present() 会把
+    //   lastOriginal 清成 ''，于是「画面静止 + 边缘密度够高 + 认不出文字」会让
+    //   跳过永久失效 —— 每 1.2 秒重新识别一张逐像素相同的图，每次都付费。
+    // 现在判据改用 lastSentThumb（与识别结果解耦），所以同一张图只买一次。
+    //
+    // 注意要按**真实的 tick 顺序**模拟：shouldSkipFrame 放行 → recognize 真正
+    // 发起请求（并在 await 前记下 lastSentThumb）→ present 拿到空结果并把
+    // lastOriginal 清空。少了中间那步就测不到这个 bug。
+    const staticEmpty = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const canvas = document.createElement('canvas');
+            canvas.width = 120; canvas.height = 40;
+            const x = canvas.getContext('2d');
+
+            // 造一张"高边缘密度但没有可识别文字"的静态图：
+            // 噪点能通过 EDGE_MIN 门槛，却不会有真实字幕
+            let seed = 12345;
+            const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+            const img = x.createImageData(canvas.width, canvas.height);
+            for (let i = 0; i < img.data.length; i += 4) {
+                const v = rnd() > 0.5 ? 255 : 0;
+                img.data[i] = img.data[i+1] = img.data[i+2] = v;
+                img.data[i+3] = 255;
+            }
+            x.putImageData(img, 0, 0);
+
+            // 模拟 recognize() 在发起请求前记下「这一帧买过了」
+            const fakeRecognize = () => { P.lastSentThumb = P.lastThumb; };
+
+            // 模拟 present() 拿到「空结果」后清掉上一句（第 2 轮起生效）
+            const fakePresentEmpty = () => {
+                P.emptyStreak++;
+                if (P.emptyStreak >= 2) {
+                    P.lastOriginal = '';
+                    P.lastTranslation = '';
+                }
+            };
+
+            const run = (rounds) => {
+                P.resetFrameState();
+                P.stats = { shots: 0, apiCalls: 0, skipped: 0, errors: 0 };
+                const decisions = [];
+                for (let i = 0; i < rounds; i++) {
+                    const skip = P.shouldSkipFrame(canvas);
+                    decisions.push(skip);
+                    if (!skip) { fakeRecognize(); fakePresentEmpty(); }
+                }
+                return decisions;
+            };
+
+            // ① 修复后的行为：9 轮静止 + 每轮都认不出文字，只应买 1 次
+            const withFix = run(9);
+
+            // ② 反证：把 lastSentThumb 清掉（= 回到"用识别结果判断"的旧语义），
+            //    同一张静止图就会被反复放行 —— 证明上面那条断言不是恒真
+            P.resetFrameState();
+            const oldBehavior = [];
+            for (let i = 0; i < 9; i++) {
+                P.lastSentThumb = null;                 // 旧判据依赖的正是这个信号
+                const skip = P.shouldSkipFrame(canvas);
+                oldBehavior.push(skip);
+                if (!skip) { fakePresentEmpty(); }
+            }
+
+            return {
+                withFix,
+                oldBehavior,
+                edge: H.edgeDensity(canvas),
+                paidCalls: withFix.filter(v => v === false).length,
+                oldPaidCalls: oldBehavior.filter(v => v === false).length,
+            };
+        })()`);
+
+    check('这张测试图确实"有边缘"（否则走的是 smartSkip 那条路，测不到本项）',
+        staticEmpty.edge >= 0.035,
+        'edge=' + staticEmpty.edge + '（需 >= EDGE_MIN 0.035）');
+    check('第一次见到的帧不跳过（该识别就识别）',
+        staticEmpty.withFix[0] === false, JSON.stringify(staticEmpty.withFix));
+    check('★ 9 轮静止且认不出文字，只花了 1 次识别（修复前是 9 次）',
+        staticEmpty.paidCalls === 1, '实际付费 ' + staticEmpty.paidCalls + ' 次：' + JSON.stringify(staticEmpty.withFix));
+    check('★ 反证：拿掉 lastSentThumb 后同一张图被反复放行（证明上面那条不是恒真）',
+        staticEmpty.oldPaidCalls === 9,
+        '旧语义下付费 ' + staticEmpty.oldPaidCalls + ' 次：' + JSON.stringify(staticEmpty.oldBehavior));
+
+    // 反向对照：换一帧内容后必须重新放行，别跳过跳过到"卡死"
+    const changedFrame = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const canvas = document.createElement('canvas');
+            canvas.width = 120; canvas.height = 40;
+            const x = canvas.getContext('2d');
+            // 纯色（与上一张噪点图差异极大）
+            x.fillStyle = '#204060';
+            x.fillRect(0, 0, canvas.width, canvas.height);
+            return { skip: P.shouldSkipFrame(canvas) };
+        })()`);
+    check('画面真的变了就重新放行（不会一直跳过）',
+        changedFrame.skip === false, JSON.stringify(changedFrame));
+
+    // ─────────────────────────────────────────────
+    S('12c. 出错分类与退避（P0-3）');
+
+    const backoff = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const cls = (e) => {
+                const err = new Error(e.msg || 'x');
+                if (e.status) err.httpStatus = e.status;
+                return H.classifyError(err);
+            };
+            const P = H.Pipeline;
+
+            // 退避序列：连续失败时应该翻倍，成功一次清零
+            P.failStreak = 0;
+            const seq = [];
+            for (let i = 0; i < 6; i++) {
+                P.failStreak = i;
+                seq.push(P.backoffDelay({ httpStatus: 429 }));
+            }
+            P.failStreak = 0;
+            return {
+                cls429: cls({ status: 429 }),
+                cls402: cls({ status: 402 }),
+                cls401: cls({ status: 401 }),
+                cls500: cls({ status: 500 }),
+                clsTimeout: cls({ msg: '请求超时' }),
+                clsUmiDown: cls({ msg: '连不上本机 Umi-OCR' }),
+                seq,
+                configDelay: (() => { P.failStreak = 0; return P.backoffDelay({ httpStatus: 401 }); })(),
+                netCap: (() => { P.failStreak = 99; return P.backoffDelay({ httpStatus: 500 }); })(),
+                rlCap: (() => { P.failStreak = 99; return P.backoffDelay({ httpStatus: 429 }); })(),
+            };
+        })()`);
+
+    check('429 归类为限流', backoff.cls429 === 'ratelimit', backoff.cls429);
+    check('402 归类为额度不足', backoff.cls402 === 'quota', backoff.cls402);
+    check('401 归类为配置错误（重试没有意义）', backoff.cls401 === 'config', backoff.cls401);
+    check('5xx 归类为网络问题', backoff.cls500 === 'network', backoff.cls500);
+    check('超时归类为网络问题', backoff.clsTimeout === 'network', backoff.clsTimeout);
+    check('Umi-OCR 连不上不误判成配置错误（它是"没启动"，可以重试）',
+        backoff.clsUmiDown !== 'config', backoff.clsUmiDown);
+    check('429 退避逐次翻倍（1s→2s→4s→8s…）',
+        backoff.seq[1] === 2 * backoff.seq[0] && backoff.seq[2] === 2 * backoff.seq[1],
+        JSON.stringify(backoff.seq));
+    check('限流退避封顶 60s', backoff.rlCap === 60000, String(backoff.rlCap));
+    check('网络类退避封顶 15s（不会退得太狠）', backoff.netCap === 15000, String(backoff.netCap));
+    check('配置类错误退避到 60s（重试无意义，别刷屏）',
+        backoff.configDelay === 60000, String(backoff.configDelay));
+
+    // ─────────────────────────────────────────────
+    S('12d. 后台标签页暂停（P0-2）');
+
+    const hiddenTest = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const out = {};
+
+            // 造一个"正在运行"的状态（不真的起循环，避免测试里跑网络）
+            H.CFG.region = { x: 40, y: 40, w: 120, h: 40 };
+            P.running = true;
+            P.hiddenPaused = false;
+            P.failStreak = 3;
+
+            P.pauseForHidden();
+            out.paused = P.hiddenPaused;
+            out.stillRunning = P.running;          // 暂停 ≠ 停止
+            out.timerCleared = P.timer === null;
+
+            P.resumeFromHidden();
+            out.resumed = P.hiddenPaused;
+            out.runningAfter = P.running;
+            P.running = false;
+            P.stop();
+            return out;
+        })()`);
+
+    check('切到后台后进入暂停态', hiddenTest.paused === true, JSON.stringify(hiddenTest));
+    check('暂停而不是停止（running 保持 true，切回来能接着跑）',
+        hiddenTest.stillRunning === true, JSON.stringify(hiddenTest));
+    check('暂停时清掉了定时器（不会在后台继续空转）',
+        hiddenTest.timerCleared === true, JSON.stringify(hiddenTest));
+    check('切回前台后恢复', hiddenTest.resumed === false && hiddenTest.runningAfter === true,
+        JSON.stringify(hiddenTest));
+
+    // 配置开关必须真的存在且默认开启（否则上面那条监听形同虚设）
+    const pauseCfg = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            return {
+                def: H.DEFAULTS.pauseWhenHidden,
+                cur: H.CFG.pauseWhenHidden,
+                san: H.sanitizeCfg({ pauseWhenHidden: 'yes' }).pauseWhenHidden,
+            };
+        })()`);
+    check('pauseWhenHidden 默认开启', pauseCfg.def === true, JSON.stringify(pauseCfg));
+    check('sanitizeCfg 会把它强转成布尔（导入的字符串不会漏过去）',
+        pauseCfg.san === true, JSON.stringify(pauseCfg));
+
+    // ─────────────────────────────────────────────
+    S('12e. stop() 清 busy：重启不再被静默吞掉（P2-1b）');
+
+    const busyTest = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            H.CFG.region = { x: 40, y: 40, w: 120, h: 40 };
+            P.running = true;
+            P.busy = true;                 // 模拟"有一个请求飞在路上"
+            P.stop();
+            const afterStop = P.busy;
+            // 停止后再点开始：ensureReady 必须放行（以前会被 busy 挡住）
+            P.running = true;
+            const ready = P.ensureReady({ paused: false, ended: false });
+            P.running = false;
+            P.stop();
+            return { afterStop, ready };
+        })()`);
+
+    check('stop() 之后 busy 被清掉', busyTest.afterStop === false, JSON.stringify(busyTest));
+    check('★ 停止后重新开始不会被旧的 busy 挡住（修复前这里会一直 false）',
+        busyTest.ready === true, JSON.stringify(busyTest));
+
+    // 回归：停止时把结果清了，就必须连「这一帧已买过」的标记一起清。
+    // 否则重开后遇到静止画面会判成"已买过"而跳过 —— 既不识别、悬浮层也没内容，
+    // 用户看到一片空白。（本轮引入又修掉的一个回归，这里锁死。）
+    const stopStartStatic = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const canvas = document.createElement('canvas');
+            canvas.width = 120; canvas.height = 40;
+            const x = canvas.getContext('2d');
+            let seed = 999;
+            const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+            const img = x.createImageData(120, 40);
+            for (let i = 0; i < img.data.length; i += 4) {
+                const v = rnd() > 0.5 ? 255 : 0;
+                img.data[i] = img.data[i+1] = img.data[i+2] = v;
+                img.data[i+3] = 255;
+            }
+            x.putImageData(img, 0, 0);
+
+            H.CFG.region = { x: 40, y: 40, w: 120, h: 40 };
+            // 跑一轮：识别过一次、也显示过一句
+            P.resetFrameState();
+            P.lastThumb = H.thumbnail(canvas);
+            P.lastSentThumb = P.lastThumb;
+            P.lastOriginal = '上一句';
+            P.lastTranslation = '译文';
+
+            P.running = true;
+            P.stop();                       // 停止：会清掉结果，也必须清掉"已买过"
+            const sentAfterStop = P.lastSentThumb;
+
+            P.running = true;
+            // 同一张静止帧：必须重新放行（否则重开后永远是空白）
+            const skip = P.shouldSkipFrame(canvas);
+            P.running = false;
+            P.stop();
+            return { sentAfterStop, skip };
+        })()`);
+
+    check('★ stop() 会连 lastSentThumb 一起清（否则重开后静止画面永远空白）',
+        stopStartStatic.sentAfterStop === null, JSON.stringify(stopStartStatic));
+    check('★ 停止→重开后，静止画面的第一帧会重新识别（不再被误判成"已买过"）',
+        stopStartStatic.skip === false, JSON.stringify(stopStartStatic));
+
+    // ─────────────────────────────────────────────
+    S('12f. resetFrameState：换区域/换引擎后不会漏识别');
+
+    const resetTest = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            P.lastThumb = new Float32Array(512).fill(1);
+            P.lastSentThumb = new Float32Array(512).fill(1);
+            P.lastOriginal = '上一句';
+            P.lastTranslation = 'last';
+            P.emptyStreak = 5;
+            const genBefore = P.gen;
+            P.resetFrameState();
+            return {
+                thumb: P.lastThumb === null,
+                sent: P.lastSentThumb === null,
+                orig: P.lastOriginal === '',
+                trans: P.lastTranslation === '',
+                streak: P.emptyStreak === 0,
+                genBumped: P.gen === genBefore + 1,
+            };
+        })()`);
+    check('resetFrameState 清掉 lastThumb / lastSentThumb / 上一句 / emptyStreak，并作废在飞结果',
+        resetTest.thumb && resetTest.sent && resetTest.orig
+        && resetTest.trans && resetTest.streak && resetTest.genBumped,
+        JSON.stringify(resetTest));
+
+    // ─────────────────────────────────────────────
+    S('12g. hexToRgb 覆盖 CSS 的全部十六进制写法（P2-4）');
+
+    // 修之前：只认恰好 6 位，其余一律静默回退成白色。
+    // 而 sanitizeCfg 的正则是 ^#[0-9a-fA-F]{3,8}$（文档也写「#RGB~#RRGGBBAA」），
+    // 所以短式 / 带 alpha 的值能通过校验、却显示成白色 —— 三者不一致。
+    const colors = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const c = (v) => H.hexToRgb(v);
+            const eq = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+            return {
+                full6: eq(c('#ff0000'), [255, 0, 0]),
+                short3: eq(c('#f00'), [255, 0, 0]),
+                short4: eq(c('#f00f'), [255, 0, 0]),
+                full8: eq(c('#ff000080'), [255, 0, 0]),
+                noHash: eq(c('00ff00'), [0, 255, 0]),
+                mixed: eq(c('#0F0'), [0, 255, 0]),
+                // 非法值仍然要安全回退成白色，且不能抛
+                junk: eq(c('red;x:url(1)'), [255, 255, 255]),
+                empty: eq(c(''), [255, 255, 255]),
+                nul: eq(c(null), [255, 255, 255]),
+                fiveDigit: eq(c('#12345'), [255, 255, 255]),
+            };
+        })()`);
+
+    check('6 位（#ff0000）解析正确', colors.full6);
+    check('★ 3 位短式（#f00）解析成红色，不再静默变白', colors.short3);
+    check('★ 4 位带 alpha 短式（#f00f）解析成红色', colors.short4);
+    check('★ 8 位带 alpha（#ff000080）解析成红色', colors.full8);
+    check('不带 # 也认', colors.noHash);
+    check('混合大小写（#0F0）也认', colors.mixed);
+    check('非法值仍安全回退白色（不抛异常）', colors.junk && colors.empty && colors.nul);
+    check('5 位这种非法长度仍然回退白色', colors.fiveDigit);
+
+    // 一致性：sanitizeCfg 放行的颜色格式，hexToRgb 必须都能解析出非白结果
+    const consistency = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            // 这些都能通过 sanitizeCfg 的 ^#[0-9a-fA-F]{3,8}$ 校验
+            const accepted = ['#f00', '#f00f', '#ff0000', '#ff000080'];
+            const bad = [];
+            for (const v of accepted) {
+                const kept = H.sanitizeCfg({ textColor: v }).textColor;
+                const rgb = H.hexToRgb(kept);
+                const isWhite = rgb[0] === 255 && rgb[1] === 255 && rgb[2] === 255;
+                // 只对"不是白色的合法颜色"要求解释成功
+                if (v.toLowerCase() !== '#ffffff' && isWhite) bad.push(v);
+            }
+            return { bad };
+        })()`);
+    check('★ 校验层放行的颜色，消费层都能正确解析（两层口径一致）',
+        consistency.bad.length === 0, '仍被当白色的: ' + JSON.stringify(consistency.bad));
+
+    // ─────────────────────────────────────────────
+    S('12h. 配置校验：URL / 模型名 / 档案 / 提示词（P2-3）');
+
+    const sanStr = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const t = (o) => H.sanitizeCfg(Object.assign({}, H.DEFAULTS, o));
+            return {
+                defaultModel: H.DEFAULTS.model,
+                badBase: t({ apiBase: 'not a url' }).apiBase,
+                emptyBase: t({ apiBase: '' }).apiBase,
+                goodBase: t({ apiBase: 'https://api.deepseek.com/' }).apiBase,
+                badUmi: t({ umiBase: 'javascript:alert(1)' }).umiBase,
+                goodUmi: t({ umiBase: 'http://127.0.0.1:1224/' }).umiBase,
+                emptyModel: t({ model: '   ' }).model,
+                longPrompt: t({ extraPrompt: 'x'.repeat(5000) }).extraPrompt.length,
+                profiles: t({ apiProfiles: [null, 'str', {}, { name: '  ' },
+                    { name: 'ok', apiBase: 'https://a.com', apiKey: ' k ', model: 'm' }] }).apiProfiles,
+                hosts: t({ disabledHosts: ['a.com', '', null, 42, ' b.com '] }).disabledHosts,
+                regions: t({ regionsByHost: [1, 2] }).regionsByHost,
+                nanInterval: t({ interval: NaN }).interval,
+            };
+        })()`);
+
+    check('非法 apiBase 兜回默认（不再让运行时拼出坏地址）',
+        sanStr.badBase === 'https://api.deepseek.com', sanStr.badBase);
+    check('apiBase 允许留空（表示用默认）', sanStr.emptyBase === '', JSON.stringify(sanStr.emptyBase));
+    check('合法 apiBase 去掉尾斜杠', sanStr.goodBase === 'https://api.deepseek.com', sanStr.goodBase);
+    check('非 http(s) 的 umiBase 兜回默认', sanStr.badUmi === 'http://127.0.0.1:1224', sanStr.badUmi);
+    check('合法 umiBase 去掉尾斜杠', sanStr.goodUmi === 'http://127.0.0.1:1224', sanStr.goodUmi);
+    check('空模型名兜回默认', sanStr.emptyModel === sanStr.defaultModel,
+        sanStr.emptyModel + ' vs ' + sanStr.defaultModel);
+    check('超长 extraPrompt 被截断（不会挤掉输出预算）',
+        sanStr.longPrompt === 2000, String(sanStr.longPrompt));
+    check('apiProfiles 里的脏项被过滤掉，合法的保留并规整',
+        sanStr.profiles.length === 1 && sanStr.profiles[0].name === 'ok'
+        && sanStr.profiles[0].apiKey === 'k', JSON.stringify(sanStr.profiles));
+    check('disabledHosts 只留非空字符串并去空白',
+        JSON.stringify(sanStr.hosts) === JSON.stringify(['a.com', 'b.com']), JSON.stringify(sanStr.hosts));
+    check('regionsByHost 是数组时兜回空对象',
+        sanStr.regions && typeof sanStr.regions === 'object' && !Array.isArray(sanStr.regions),
+        JSON.stringify(sanStr.regions));
+    check('数值区间仍然生效（NaN → 默认值）', sanStr.nanInterval === 1200, String(sanStr.nanInterval));
+
+    // ─────────────────────────────────────────────
+    S('12i. 诊断报告能解释「为什么慢/为什么停」（本轮新增字段）');
+
+    // 退避中和后台暂停时，用户看到的是"什么都没发生" —— 报告里必须有这两行，
+    // 否则只能靠猜。这两项是本轮新增行为（分类退避 + 后台暂停）的观测窗口。
+    const repDiag = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            // 摆出一个"正在退避"且"切到后台"的状态，看报告怎么写
+            P.failStreak = 3;
+            P.hiddenPaused = true;
+            const t = H.Diag.build();
+            P.failStreak = 0;
+            P.hiddenPaused = false;
+            return { report: t };
+        })()`);
+    check('报告写明「切后台暂停」开关', /切后台暂停/.test(repDiag.report));
+    check('报告写出连续失败次数（退避线索）', /连续失败\s*:\s*3/.test(repDiag.report),
+        (repDiag.report.match(/.*连续失败.*/) || ['(没找到该行)'])[0]);
+    check('报告写出「切到后台暂停中」的状态', /后台暂停\s*:\s*是/.test(repDiag.report),
+        (repDiag.report.match(/.*后台暂停.*/) || ['(没找到该行)'])[0]);
+
+    // 没在退避/暂停时要如实写"否"，不能恒真
+    const repDiag2 = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            H.Pipeline.failStreak = 0;
+            H.Pipeline.hiddenPaused = false;
+            return { report: H.Diag.build() };
+        })()`);
+    check('没暂停时报告写「否」（这一行不是恒真）',
+        /后台暂停\s*:\s*否/.test(repDiag2.report),
+        (repDiag2.report.match(/.*后台暂停.*/) || ['(没找到该行)'])[0]);
+
+    // ─────────────────────────────────────────────
     // destroy() 会把面板整个拆掉、els 清空，所以必须放在最后
     S('13. H3 destroy() 会停止标签页共享');
 

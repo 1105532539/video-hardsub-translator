@@ -1,6 +1,6 @@
 # 测试与性能基准指南
 
-> 本项目有 **444 项端到端测试**，零第三方依赖，用真实 Chrome 跑真实 DOM。
+> 本项目有 **523 项端到端测试**，零第三方依赖，用真实 Chrome 跑真实 DOM。
 > 本文说明如何运行、如何编写新测试，以及如何测量性能变化。
 
 ---
@@ -70,18 +70,20 @@ export CHROME_PATH=/usr/bin/google-chrome
 ## 快速开始
 
 ```bash
-node _test/engine.mjs        # 引擎层
-node _test/opt.mjs           # 专项测试
-node _test/allsite.mjs       # 全站运行策略
-node _test/smoke-panel.mjs   # 面板冒烟
-node _test/layout.mjs        # 布局几何
-node _test/fullscreen.mjs    # 全屏适配
+node _test/engine.mjs         # 引擎层
+node _test/browser-ai.mjs     # 浏览器内置 AI（离线引擎）
+node _test/web-translate.mjs  # 免费网页接口（逆向）
+node _test/opt.mjs            # 专项测试
+node _test/allsite.mjs        # 全站运行策略
+node _test/smoke-panel.mjs    # 面板冒烟
+node _test/layout.mjs         # 布局几何
+node _test/fullscreen.mjs     # 全屏适配
 ```
 
 也可以在项目根目录用 npm 脚本：
 
 ```bash
-npm test              # 依次跑完全部 6 个套件
+npm test              # 依次跑完全部 8 个套件
 npm run test:engine   # 只跑引擎层
 npm run bench         # 单版本性能基准
 ```
@@ -107,16 +109,17 @@ npm run bench         # 单版本性能基准
 
 | 套件 | 项数 | 覆盖重点 | 页面端口 / CDP 端口 |
 | --- | --- | --- | --- |
+| `build.mjs` | 27 | 构建守卫本身：顶层重名、依赖无人提供、虚报 provide、模块编号重复、非法文件名、版本号不一致、**语法门必须在写文件前生效**、`--check` 三种情形、缺模块头声明、扫描器抗注释/字符串绕过 | 无（不起 Chrome、不占端口） |
 | `engine.mjs` | 50 | 请求体构造、思考模式参数、响应解析（三种 content 形态）、错误提示、模型能力判定、端到端识别链路 | 8780 / 9380 |
-| `browser-ai.mjs` | 94 | 浏览器内置 AI 离线引擎：语言映射、内核版本门槛、能力探测、全离线链路（断言零网络请求）、会话复用、多模态读图、流式拼接与节流、Edge 式坏语言对与经英语中转、准备阶段自检、面板联动 | 8781 / 9381 |
+| `browser-ai.mjs` | 96 | 浏览器内置 AI 离线引擎：语言映射、内核版本门槛、能力探测、全离线链路（断言零网络请求）、会话复用、多模态读图、**画布快照时序（识别期间覆盖画布）**、流式拼接与节流、Edge 式坏语言对与经英语中转、准备阶段自检、面板联动 | 8781 / 9381 |
 | `web-translate.mjs` | 44 | 免费网页接口（逆向）：语言码逐家映射、降级链（逐个挂掉看它换谁）、全挂时的错误聚合、必应 token 过期重取、限速、缓存、指定单一接口、测活、面板联动 | 8782 / 9382 |
-| `opt.mjs` | 76 | 各轮优化专项：模型判定、LRU 缓存、区域锚点投影、缩略图独立数组、框选交互、`destroy()` 清理 | 8790 / 9390 |
+| `opt.mjs` | 126 | 各轮优化专项：模型判定、LRU 缓存、区域锚点投影、缩略图独立数组、框选交互、`destroy()` 清理，以及本轮新增的**静帧不再重复付费识别（含反证）**、出错分类与指数退避、后台暂停、`stop()` 清 `busy` 与 `lastSentThumb`（停止→重开不再空白）、`resetFrameState`、`hexToRgb` 位宽一致性、配置校验 | 8790 / 9390 |
 | `allsite.mjs` | 37 | 全站策略：无视频只留胶囊、iframe 不污染、本站禁用、按站点记忆区域、默认值不被污染 | 8770 / 9370 |
 | `smoke-panel.mjs` | 79 | 面板挂载、元素引用完整性、平台预设、配置档案、导入导出、诊断、配置持久化（刷新后仍在） | 8760 / 9360 |
 | `layout.mjs` | 33 | 面板在视口内、控件尺寸与边框、按钮无需滚动即可点到、设置项高度不失控 | 8764 / 9364 |
 | `fullscreen.mjs` | 31 | 全屏时 UI 搬进全屏子树、`<video>` 全屏改用原生字幕轨、退出全屏搬回 body | 8822 / 9422 |
 
-合计 **444 项**。
+合计 **523 项**。
 
 > `browser-ai.mjs` 给 `Translator` / `LanguageModel` 打了一套行为一致的替身（这两个全局对象实测可写可覆盖），
 > 所以它**不会**真的下载端侧模型。替身刻意模仿了两个真实坑：流式分片既有累计式也有增量式、
@@ -140,7 +143,10 @@ await cdp.evaluate(expr, { sessionId });
 cdp.errorsFor(sessionId);                            // 收集页面异常
 ```
 
-它会**收集页面抛出的异常与 console 错误**，因此每个套件最后都有一项「页面无 JS 异常」断言——这是发现"改动引入隐蔽报错"的关键防线。
+它会**收集页面抛出的异常**，因此每个套件最后都有一项「页面无 JS 异常」断言——这是发现"改动引入隐蔽报错"的关键防线。
+
+> ⚠️ 注意：`cdp.mjs` 同时也在累积 `consoleErrors`，但**目前没有任何套件读取它**
+> （`errorsFor()` 只过滤 `pageErrors`）。所以脚本里的 `console.error` **不会**让测试失败。
 
 `startServer()` 提供一个带 **Range 请求支持**的静态服务器（视频元素播放需要它），并默认开启 CORS。
 
@@ -385,7 +391,7 @@ node _test/bench-ab.mjs <旧版脚本> <新版脚本> [轮数=3]
 | `UI.mount` | 0.700 ms | 0.700 ms | 持平 |
 | 300 轮热路径堆增长 | 0 KB | 0 KB | 持平 |
 
-同时 **444 项功能测试全部通过**，证明优化未改变行为。
+同时 **523 项功能测试全部通过**，证明优化未改变行为。
 
 ---
 
@@ -450,40 +456,26 @@ node _test/shots.mjs      # 生成 _test/shots/{1-panel,2-diag,3-wide}.png
 
 所有套件通过退出码表示结果（全通过为 0），因此可直接接入 CI。
 
-> **现状说明**：本项目开发环境为 Windows，测试套件目前**仅在 Windows 上验证过**。由于路径已改为相对解析、Chrome 路径可用 `CHROME_PATH` 指定，理论上可在 Linux runner 上运行，但本仓库尚未在 CI 上实际跑过，因此没有提交 workflow 文件。下面是一个起点（请自行验证）：
+仓库已提供 `.github/workflows/ci.yml`，分两个 job：
 
-```yaml
-name: tests
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install Chrome
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-      - name: Run test suites
-        env:
-          CHROME_PATH: /usr/bin/google-chrome
-        run: |
-          node _test/engine.mjs
-          node _test/opt.mjs
-          node _test/allsite.mjs
-          node _test/smoke-panel.mjs
-          node _test/layout.mjs
-          node _test/fullscreen.mjs
-```
+| job | 内容 | 说明 |
+| --- | --- | --- |
+| `build` | `build.mjs --check` + `node --check` | **只依赖 Node，零 flake**，任何改动都会跑 |
+| `test` | `npm test`（9 个套件） | 跑在 `windows-latest`，与本项目开发环境对齐 |
+
+> **为什么 `build` 必须单独成一个 job**：`package.json` 的 `pretest` 会先执行
+> `npm run build`，**重新生成产物**。所以「改了 `src/` 却忘了构建」这种漂移
+> **永远不会让 `npm test` 失败** —— 只有单独的 `build:check` 能发现它。
+> 本地提交前请**两个都跑**（见 `CONTRIBUTING.md`「提交前必须通过」）。
 
 注意要点：
 
 - **必须串行**执行各套件（端口冲突），不要用矩阵并行拆成多个 job 跑同一台机器
 - headless Chrome 需要 `--no-sandbox`（`cdp.mjs` 已默认加上）
-- 首次运行前需确保 Chrome 版本与 `--headless=new` 兼容（Chrome 112+）
+- `windows-latest` runner 已预装 Chrome，且路径与 `cdp.mjs:12-13` 的默认值一致；
+  用其它系统或非默认安装路径时，通过 `CHROME_PATH` 环境变量指定
+- 此前各套件**仅在 Windows 上验证过**，所以 CI 先用 `windows-latest`；
+  待 Linux 验证通过后可以再换成 `ubuntu-latest` 以降低成本
 
 ---
 

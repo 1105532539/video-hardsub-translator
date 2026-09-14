@@ -8,7 +8,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.12.0';
+    const SCRIPT_VERSION = '1.13.0';
 
     const Diag = {
         modal: null,
@@ -113,6 +113,7 @@
                 p('  最大输出     : ' + CFG.maxTokens + ' tokens');
             }
             p('  参数         : 间隔 ' + CFG.interval + 'ms, 智能跳过 ' + CFG.smartSkip
+                + ', 切后台暂停 ' + (CFG.pauseWhenHidden ? '开' : '关')
                 + ', 相似度阈值 ' + CFG.textSimThreshold);
             p('');
 
@@ -158,6 +159,11 @@
             const s = Pipeline.stats;
             p('  截图 ' + s.shots + ' / 调API ' + s.apiCalls + ' / 跳过 ' + s.skipped + ' / 错误 ' + s.errors);
             p('  运行中 : ' + Pipeline.running);
+            // 这两项是新加入的"为什么会慢/会停"的线索：退避中或后台暂停时，
+            // 用户看到的是"什么都没发生"，没有这两行就只能猜
+            p('  连续失败 : ' + (Pipeline.failStreak || 0)
+                + (Pipeline.failStreak ? '（正在退避重试）' : ''));
+            p('  后台暂停 : ' + (Pipeline.hiddenPaused ? '是（切回该标签页自动继续）' : '否'));
             p('  状态行 : ' + (UI.els.status ? UI.els.status.textContent : '-'));
             p('');
 

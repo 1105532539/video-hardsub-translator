@@ -10,7 +10,8 @@
     //
     //  对外提供：Pipeline
     //  依赖：CFG、Capturer、UI、Overlay、Diag、recognizeAndTranslate、thumbnail、
-    //              thumbDiff、edgeDensity、textSimilarity、sleep、findVideo、log、warn
+    //              thumbDiff、edgeDensity、textSimilarity、classifyError、findVideo、
+    //              log、warn、NO_CHANGE_DIFF、EDGE_MIN
     // ═══════════════════════════════════════════════════════════════
     const Pipeline = {
         running: false,
@@ -19,12 +20,36 @@
         // 每次 start / stop / 换区域都 +1；异步结果回来时对不上就说明这次识别已作废，直接丢掉。
         gen: 0,
         lastThumb: null,
+        // 「上一次**实际送出去识别**的那一帧」。两者的区别很关键：
+        //   lastThumb      = 上一次**进到「该不该跳过」判断**的帧，用于比对画面有没有变
+        //   lastSentThumb  = 上一次**花了钱识别过**的帧
+        // 注意 lastThumb 只在「没被跳过」时更新（见 shouldSkipFrame 末尾），
+        // 跳过的那一轮不刷新 —— 否则每次都拿刚存下的自己跟自己比，变化检测会失效。
+        //
+        // 跳过的判据用 lastSentThumb，才能覆盖「画面静止但识别不出文字」的情况：
+        // 那种情况下 lastOriginal 恒为空，用它会让同一张图被反复送去付费识别（见 P0-1）。
+        lastSentThumb: null,
         lastOriginal: '',
         lastTranslation: '',
         emptyStreak: 0,
+        // 后台标签页暂停期间为 true；用来区分「用户按了停止」和「只是切走了」
+        hiddenPaused: false,
+        // 连续失败次数，用于指数退避（成功一次即清零）
+        failStreak: 0,
         stats: { shots: 0, apiCalls: 0, skipped: 0, errors: 0 },
 
         invalidate() { this.gen++; },
+
+        /** 把「与上一帧有关」的状态一次清干净：换区域 / SPA 跳页 / 改配置后都该调它。
+         *  以前这段是手工复制在 4 个调用点上的，容易漏（漏了会把新句当成重复句吞掉）。 */
+        resetFrameState() {
+            this.lastThumb = null;
+            this.lastSentThumb = null;
+            this.lastOriginal = '';
+            this.lastTranslation = '';
+            this.emptyStreak = 0;
+            this.invalidate();
+        },
 
         start() {
             if (this.running) return;
@@ -36,6 +61,7 @@
             this.running = true;
             this.lastThumb = null;
             this.emptyStreak = 0;
+            this.failStreak = 0;      // 重开就重置退避，别继承上一次的惩罚
             UI.setRunning(true);
             UI.setStatus('运行中…', 'ok');
             this.tick();
@@ -45,11 +71,20 @@
             this.running = false;
             this.invalidate();
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            // 清 busy：否则在飞请求返回前（最长一次 GM 超时）重新点「开始」会被
+            // ensureReady 里的 busy 判断静默吞掉，表现成"点了没反应"。
+            // 安全性由 gen 保证 —— 迟到的结果对不上代，本来就会被丢弃。
+            this.busy = false;
             // 停止要收掉字幕：不然最后一句一直挂着，用户以为还在翻译（换集 / 暂停时尤其容易误会）。
             // 「上一句」也得清 —— 否则重开后与停之前相同的首句会被当成重复句直接吞掉。
             Overlay.clear();
             this.lastOriginal = '';
             this.lastTranslation = '';
+            // ⚠️ lastSentThumb 必须跟着一起清：它标记的是"这一帧已经买过了"，
+            // 而上面刚把结果（lastOriginal / lastTranslation）丢掉。若保留它，
+            // 重开后遇到静止画面会被判成"已买过"而跳过 —— 结果就是既不识别、
+            // 悬浮层也没内容可显示，用户看到一片空白。（这是本轮引入又修掉的回归。）
+            this.lastSentThumb = null;
             this.emptyStreak = 0;
             UI.setRunning(false);
             UI.setStatus('已停止', 'idle');
@@ -57,27 +92,74 @@
 
         toggle() { this.running ? this.stop() : this.start(); },
 
-        async tick() {
+        /**
+         * 切到后台：暂停主循环，但**不算停止** —— 保留 running 与 lastSentThumb，
+         * 这样切回来能接着跑，且画面没变时不必重新花钱。
+         * 之所以必须专门处理：视频在后台标签页会继续播放，`video.paused` 是 false，
+         * 现有那道闸门拦不住 —— 会一直截图并调用付费接口，而没人看得到结果。
+         */
+        pauseForHidden() {
+            if (!this.running || this.hiddenPaused) return;
+            this.hiddenPaused = true;
+            this.invalidate();                 // 作废在飞结果
+            if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            UI.setStatus('已切到后台，暂停翻译（切回本标签页自动继续）', 'idle');
+        },
+
+        /** 切回前台：接着跑。没在运行、或不是被后台暂停的，都不动。 */
+        resumeFromHidden() {
+            if (!this.hiddenPaused) return;
+            this.hiddenPaused = false;
             if (!this.running) return;
+            this.invalidate();
+            UI.setStatus('已回到前台，继续翻译…', 'ok');
+            if (!this.timer) this.tick();
+        },
+
+        /** 本次失败后应该等多久再试（按错误类型区分；见 P0-3） */
+        backoffDelay(e) {
+            const kind = classifyError(e);
+            // 配置类错误重试没有意义：退避到很慢，避免一直刷屏烧请求
+            if (kind === 'config') return 60000;
+            const base = (kind === 'ratelimit' || kind === 'quota') ? 1000 : 500;
+            const cap = (kind === 'ratelimit' || kind === 'quota') ? 60000 : 15000;
+            const n = Math.min(this.failStreak, 6);          // 1s→2s→4s…→32s（封顶见 cap）
+            return Math.min(cap, base * Math.pow(2, n));
+        },
+
+        async tick() {
+            if (!this.running || this.hiddenPaused) return;
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
 
+            let wait = Math.max(300, CFG.interval);
             try {
                 await this.step();
+                this.failStreak = 0;              // 这一轮没抛错 → 退避清零
             } catch (e) {
                 this.stats.errors++;
+                this.failStreak++;
                 warn('step 出错：', e);
                 Diag.lastError = {
                     time: new Date().toLocaleTimeString(),
                     msg: String(e && e.message || e),
                     stack: e && e.stack ? String(e.stack).split('\n').slice(0, 3).join('\n') : '',
                 };
-                UI.setStatus('出错：' + e.message, 'err');
-                // 连续出错就停一会儿，避免刷屏
-                await sleep(1500);
+                const kind = classifyError(e);
+                if (kind === 'config') {
+                    // 模型名 / 地址 / Key 写错这类问题，重试永远好不了：停下来让用户去改
+                    UI.setStatus('出错：' + e.message, 'err');
+                    UI.setStatus('配置有问题，已自动停止：' + e.message, 'err');
+                    this.stop();
+                    return;
+                }
+                const ms = this.backoffDelay(e);
+                wait = Math.max(wait, ms);
+                UI.setStatus('出错（' + (kind === 'ratelimit' ? '被限流' : kind === 'quota' ? '额度不足' : '请求失败')
+                    + '），' + Math.round(ms / 1000) + 's 后重试：' + e.message, 'err');
             }
 
-            if (this.running) {
-                this.timer = setTimeout(() => this.tick(), Math.max(300, CFG.interval));
+            if (this.running && !this.hiddenPaused) {
+                this.timer = setTimeout(() => this.tick(), wait);
             }
         },
 
@@ -181,8 +263,16 @@
             const noChange = this.lastThumb
                 && thumbDiff(thumb, this.lastThumb) < NO_CHANGE_DIFF;
 
-            // 上一轮识别到文字、且画面几乎没变 → 跳过；预览也放在这之后，画面一模一样时重画纯属白费。
-            if (noChange && this.lastOriginal) {
+            // 判据用 lastSentThumb（上一次**花钱识别过**的那一帧），而不是 lastOriginal。
+            //
+            // 为什么不能用 lastOriginal：识别结果为空时 present() 会把它清成 ''，于是
+            // 「画面静止 + 边缘密度够高 + 识别不出文字」这个组合会让本判断永远不成立 ——
+            // 每隔一个间隔就重新识别一张逐像素相同的图，每次钱照扣、结果都是空。
+            // 静止空镜 / 风景 / 标题卡都会命中这条路。
+            //
+            // lastSentThumb 在 recognize() 真正发起请求前更新，与「识别结果是否为空」解耦：
+            // 同一张图只买一次，无论买回来的答案是什么。
+            if (noChange && this.lastSentThumb) {
                 this.stats.skipped++;
                 UI.setStatus('画面未变化，跳过', 'idle');
                 return true;
@@ -201,6 +291,10 @@
                         Overlay.clear();
                         this.lastOriginal = '';
                     }
+                    // 这里也更新 lastSentThumb：这一帧（含它的边缘特征）已经判过，
+                    // 就算它后来变得"像有文字"，也得等画面真的变化才会重判。
+                    // 注意存的是**已经算出来的 thumb**，不额外截图。
+                    this.lastSentThumb = thumb;
                     UI.setStatus('未检测到文字，跳过（边缘密度 ' + ed.toFixed(3) + '）', 'idle');
                     return true;
                 }
@@ -210,6 +304,9 @@
 
         /** 调识别 / 翻译引擎；返回 null 表示结果已作废 */
         async recognize(canvas, myGen) {
+            // 记下「这一帧已经买过了」——放在 await 之前，成功失败都算买过。
+            // 空结果同样要记：否则下一轮又会对同一张图再买一次（这正是 P0-1 的漏钱点）。
+            this.lastSentThumb = this.lastThumb;
             this.busy = true;
             UI.setStatus('识别中…', 'busy');
             const t0 = performance.now();
@@ -217,6 +314,11 @@
             try {
                 this.stats.apiCalls++;
                 res = await recognizeAndTranslate(canvas, { onDelta: this.partialSink(myGen) });
+            } catch (e) {
+                // 失败不保留「买过了」的标记：让下一轮能重试同一帧。
+                // 否则一次网络抖动会让这张图在整个静止期间都不再被识别。
+                this.lastSentThumb = null;
+                throw e;
             } finally {
                 this.busy = false;
             }

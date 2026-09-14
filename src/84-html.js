@@ -49,10 +49,33 @@
         el.innerHTML = html;
     }
 
-    /** '#rrggbb' → [r,g,b]，解析失败回退白色 */
+    /**
+     * 十六进制颜色 → [r,g,b]；解析失败回退白色。
+     *
+     * 支持 CSS 的全部十六进制写法：`#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`。
+     * 为什么必须覆盖这些：sanitizeCfg 的校验正则是 `^#[0-9a-fA-F]{3,8}$`
+     * （docs/ARCHITECTURE.md 也把白名单写成「#RGB~#RRGGBBAA」），也就是说
+     * **短式和带 alpha 的值能通过校验**。而这里原来只认恰好 6 位，其余一律
+     * 静默回退成白色 —— 用户从「导入配置」带进 `#f00` 或 `#ff000080` 时会
+     * 设了个颜色却显示成白色，且没有任何提示。
+     * 现在按 CSS 语义展开短式，4/8 位取前 6 位（alpha 由 bgOpacity 单独控制，
+     * 不在这里混进来，避免动到既有的不透明度行为）。
+     */
     function hexToRgb(hex) {
-        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
-        if (!m) return [255, 255, 255];
-        const n = parseInt(m[1], 16);
-        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+        const s = String(hex == null ? '' : hex).trim().replace(/^#/, '');
+        // 只接受 3/4/6/8 位十六进制（4 位 = 带 alpha 的短式）
+        if (!/^[0-9a-f]+$/i.test(s)) return [255, 255, 255];
+        let r, g, b;
+        if (s.length === 3 || s.length === 4) {
+            r = parseInt(s[0] + s[0], 16);
+            g = parseInt(s[1] + s[1], 16);
+            b = parseInt(s[2] + s[2], 16);
+        } else if (s.length === 6 || s.length === 8) {
+            r = parseInt(s.slice(0, 2), 16);
+            g = parseInt(s.slice(2, 4), 16);
+            b = parseInt(s.slice(4, 6), 16);
+        } else {
+            return [255, 255, 255];
+        }
+        return [r, g, b];
     }

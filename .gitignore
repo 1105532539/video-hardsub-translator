@@ -8,6 +8,9 @@
 _backup/
 .bili/
 dsh-upgrade/
+# DSH 工具链产物：本机环境的东西，不属于本项目
+dsh-plugins/
+dsh-browser-agent-install/
 
 # 早期版本的独立副本：历史版本请走 releases / git 历史，
 # 不再往仓库里堆一份 177KB 的旧脚本
@@ -18,6 +21,8 @@ video-hardsub-translator1.user.js
 /_netcheck.mjs
 /_youdao_probe.mjs
 /_ytdiag.mjs
+# 量「字幕截图在各级 JPEG 质量下的体积」用（验证「0.9 是否过高」那条提议）
+/_jpeg_probe.mjs
 
 # ── 参考用的第三方项目克隆 ──────────────────────────────────
 # LunaTranslator（HIllya51/LunaTranslator）是本地拉下来做翻译路线调研的参考源码，

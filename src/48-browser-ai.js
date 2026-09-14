@@ -724,7 +724,10 @@
     // ── 识别 ─────────────────────────────────────────────────
 
     /** 画布 → Blob。转一手是为了**快照**：captureMode 下画布是复用的，直接把 canvas 交给异步的
-     *  模型调用，像素可能已经被下一帧盖掉。 */
+     *  模型调用，像素可能已经被下一帧盖掉。⚠️ 调用方必须在 await 任何东西**之前**调用它
+     *  （见 baiOcrByBuiltin 里的说明），否则这个快照本身就失去意义。
+     *  质量取 0.9：产物只喂给端侧模型，**不经过网络、不按字节计费**，所以不必像
+     *  上传云端那几条路一样压到 0.85（详见 32-util.js 的 canvasToJpeg）。 */
     function baiCanvasBlob(canvas) {
         return new Promise((resolve, reject) => {
             let done = false;
@@ -757,8 +760,14 @@
     }
 
     async function baiOcrByBuiltin(canvas) {
-        const session = await baiOcrSession();
+        // ⚠️ 顺序很重要：必须**先**把画布转成 blob（= 快照），再 await 会话。
+        //    captureMode 下 canvas 是复用画布（Capturer._out），而 baiOcrSession()
+        //    首次调用可能要去初始化/加载模型、耗时数秒；在它让出事件循环期间，
+        //    UI.manualShot() 或框选拖拽的预览截图会把同一张画布的像素盖掉 ——
+        //    那样识别到的就是**另一帧**，属于静默出错（本项目最忌讳的那类）。
+        //    原来这两行是反的，与 baiCanvasBlob 上方"转一手是为了快照"的注释自相矛盾。
         const blob = await baiCanvasBlob(canvas);
+        const session = await baiOcrSession();
         let out;
         try {
             out = await session.prompt([{

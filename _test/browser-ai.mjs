@@ -440,6 +440,83 @@ try {
         builtin.texts.length === 1 && builtin.texts[0] === 'おはよう、いい天気ですね。',
         JSON.stringify(builtin.texts));
 
+    // 快照时序（P2-1）：必须在 await 会话**之前**就把画布转成 blob。
+    // baiCanvasBlob 上方的注释写明"转一手是为了快照：捕获模式下画布是复用的，
+    // 像素可能已被下一帧盖掉"，但原来代码是先 await 会话、后取快照 —— 顺序反了。
+    //
+    // 关键：必须挂在 **LanguageModel.create** 上制造延迟，而不是替换
+    // window.__H1SUB__.baiOcrSession —— 后者没用，因为 baiOcrByBuiltin 引用的是
+    // 闭包里的那个函数（早先的版本就是栽在这里，变异测试证明它恒真）。
+    // baiOcrSession() 内部会 await LanguageModel.create()，所以延迟它 = 拉大竞态窗口。
+    const snapshotRace = await evAsync(`
+        (async () => {
+            const H = window.__H1SUB__;
+            Object.assign(H.CFG, { engine: 'browser-ai', baiOcr: 'builtin', baiTrans: 'translator' });
+            H.baiReset();
+            window.__bai.reset();
+            window.__bai.state.ocrReply = 'あ';
+
+            // 画布：纯红（若被覆盖会变成纯蓝）
+            const c = document.createElement('canvas');
+            c.width = 120; c.height = 40;
+            const cx = c.getContext('2d');
+            cx.fillStyle = '#ff0000'; cx.fillRect(0, 0, 120, 40);
+
+            // 让 LanguageModel.create 慢下来 —— 这是 baiOcrSession() 里真正 await 的东西
+            const origCreate = window.LanguageModel.create;
+            window.LanguageModel.create = function (opts) {
+                return new Promise(function (resolve, reject) {
+                    setTimeout(function () {
+                        origCreate.call(window.LanguageModel, opts).then(resolve, reject);
+                    }, 80);
+                });
+            };
+
+            let painted = false;
+            const p = H.recognizeAndTranslate(c).then(function (r) {
+                let rgb = null;
+                // recognizeAndTranslate 里翻译也会走一次 LM/Translator，取**读图**那次输入
+                for (let i = window.__bai.lmInputs.length - 1; i >= 0; i--) {
+                    const input = window.__bai.lmInputs[i];
+                    const msg = Array.isArray(input) ? input[0] : null;
+                    const img = (msg && msg.content || []).filter(function (x) {
+                        return x.type === 'image';
+                    })[0];
+                    if (img && img.value) return { out: r, blob: img.value };
+                }
+                return { out: r, blob: null };
+            });
+
+            // 在 create 还没 resolve 的时候把同一张画布涂蓝
+            await new Promise(function (res) { setTimeout(res, 20); });
+            cx.fillStyle = '#0000ff'; cx.fillRect(0, 0, 120, 40);
+            painted = true;
+
+            const got = await p;
+            window.LanguageModel.create = origCreate;
+
+            let rgb = null;
+            if (got.blob) {
+                const bmp = await createImageBitmap(got.blob);
+                const t = document.createElement('canvas');
+                t.width = 8; t.height = 8;
+                const tx = t.getContext('2d', { willReadFrequently: true });
+                tx.drawImage(bmp, 0, 0, 8, 8);
+                const d = tx.getImageData(0, 0, 4, 4).data;
+                rgb = [d[0], d[1], d[2]];
+            }
+            return { rgb, painted: painted, hadBlob: !!got.blob };
+        })()`);
+
+    check('竞态测试确实在等待期间改写了画布（否则这条测不到东西）',
+        snapshotRace.painted === true && snapshotRace.hadBlob === true,
+        JSON.stringify({ painted: snapshotRace.painted, hadBlob: snapshotRace.hadBlob }));
+    check('★ 送进模型的是 await 之前那一帧（红色），不是被覆盖后的蓝色',
+        snapshotRace.rgb && snapshotRace.rgb[0] > 200 && snapshotRace.rgb[2] < 60,
+        '实际取到 rgb=' + JSON.stringify(snapshotRace.rgb)
+        + '（红=[255,0,0]，蓝=[0,0,255]；拿到蓝色说明快照发生在 await 之后）');
+
+
     S('6. 流式显示');
     const stream = await evAsync(`
         (async () => {

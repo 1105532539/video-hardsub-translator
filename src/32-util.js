@@ -2,7 +2,7 @@
     //  32-util.js — 通用小工具
     //
     //  对外提供：parseModelJson、sleep、canvasToJpeg、stripDataUrlPrefix、
-    //              stripWrappingQuotes、LANG_ALIASES、langCode
+    //              stripWrappingQuotes、classifyError、LANG_ALIASES、langCode
     //  依赖：无
     // ═══════════════════════════════════════════════════════════════
     /** 从模型返回里尽力抠出 JSON */
@@ -17,7 +17,48 @@
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-    /** canvas → JPEG data URL。三种引擎最后都走这一步，质量参数按引擎调过 */
+    /**
+     * 把一次失败归类，供主循环决定「退避重试」还是「停下来让用户改配置」。
+     *
+     * 优先用异常上带的 `httpStatus`（60-chat.js 的 callChatCore 会挂上去），
+     * 拿不到再退回文案匹配 —— Umi-OCR / 有道 / 免费网页接口那几条路径没带状态码。
+     *
+     * @returns {'config'|'quota'|'ratelimit'|'network'|'other'}
+     *   config    = 配置错了，重试永远不会好（Key / 地址 / 模型名 / 未授权）
+     *   quota     = 余额或额度问题（402），重试也没用但要给用户时间充值
+     *   ratelimit = 429 / 频率限制，退避后通常能恢复
+     *   network   = 超时 / 断网 / 5xx，多半是暂时的
+     */
+    function classifyError(e) {
+        const status = Number(e && e.httpStatus);
+        if (Number.isFinite(status) && status > 0) {
+            if (status === 429 || status === 1411) return 'ratelimit';
+            if (status === 402) return 'quota';
+            if (status === 401 || status === 403 || status === 404) return 'config';
+            if (status >= 500) return 'network';
+            if (status >= 400) return 'other';
+        }
+
+        const m = String((e && e.message) || e || '');
+        if (/请求超时|超时|timeout|网络请求失败|NetworkError|Failed to fetch/i.test(m)) return 'network';
+        if (/额度|余额|欠费|402/.test(m)) return 'quota';
+        if (/太频繁|频率受限|429|1411/.test(m)) return 'ratelimit';
+        if (/API Key|appKey|appSecret|未填|地址|模型名|401|403|404|110|108|202|205/i.test(m)) return 'config';
+        if (/HTTP 5\d\d/.test(m)) return 'network';
+        return 'other';
+    }
+
+    /**
+     * canvas → JPEG data URL。
+     *
+     * 质量参数按**去哪**而定，不是随手写的（实测：1400×116 的字幕条在这个区间里，
+     * 0.9 的产物约 85 KB，0.85 省 15%，0.95 多 27%，1.0 直接翻到 3 倍）：
+     *   - 0.85  openai-vision —— **唯一真正上传到付费云端的**那条路，取最省的一档
+     *   - 0.90  youdao-img —— 按量计费，同样要省
+     *   - 0.92  umi-ocr / web-translate / browser-ai（配 Umi-OCR 时）——
+     *           只发给 `127.0.0.1` 的本机服务，不出设备、不按字节计费，所以给高一点换识别率
+     * 端侧读图那条路不走这里（它用 `toBlob`，压根不经过网络）。
+     */
     function canvasToJpeg(canvas, quality) {
         return canvas.toDataURL('image/jpeg', quality);
     }

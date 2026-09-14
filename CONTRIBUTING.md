@@ -124,7 +124,7 @@ npm run lint           # 构建 + 语法检查
 需要 Node.js ≥ 22 与本机 Chrome：
 
 ```bash
-npm test                 # 全部 6 个套件（串行）
+npm test                 # 全部 9 个套件（串行）
 node _test/smoke-panel.mjs   # 只跑某一个
 node _test/shots.mjs         # 生成面板截图便于目视检查
 ```
@@ -299,7 +299,7 @@ node _test/layout.mjs        # 期望 33/33
 node _test/fullscreen.mjs    # 期望 31/31
 ```
 
-**444 项必须全部通过，且退出码为 0。**
+**523 项必须全部通过，且退出码为 0。**
 
 ### 新功能 / 修 Bug 必须带测试
 
@@ -343,7 +343,7 @@ Closes #123
 
 ## 测试
 - [ ] node --check 通过
-- [ ] 8 个测试套件全部通过（444/444）
+- [ ] 9 个测试套件全部通过（523/523）
 - [ ] 新增/修改的测试能证明修复有效
 
 ## 行为影响
@@ -391,7 +391,7 @@ node _test/shots.mjs     # 输出到 _test/shots/
 
 ## 版本发布流程
 
-1. 确认 `main` 上全部测试通过（`npm test`，应 444 项全部通过）。
+1. 确认 `main` 上全部测试通过（`npm test`，应 523 项全部通过）。
 2. 更新**四处**版本号（必须全部一致——只改前两处会导致包版本与 README 徽章和脚本版本脱节）：
    - 用户脚本头部元数据 `// @version      <新版本号>`
    - 脚本内 `const SCRIPT_VERSION = '<新版本号>';`

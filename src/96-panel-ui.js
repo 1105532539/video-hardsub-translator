@@ -14,7 +14,7 @@
     //              isStaleDeepSeekModel、shouldDisableThinking、umiBase、umiProbe、
     //              callUmiOCR、callYoudaoImage、callChat、recognizeAndTranslate、
     //              baiPair、baiProbe、baiPrepare、baiReset、baiBrowser、baiVersionNote、
-    //              langCode、wtSelftest、
+    //              langCode、wtSelftest、wtReset、uiHost、
     //              Capturer、Pipeline、Overlay、Diag、Fullscreen、RegionSelector、
     //              openModal、setHTML、escapeHtml、STATUS_COLORS、panelHTML、panelCSS、
     //              banCurrentHost、cache
@@ -61,7 +61,7 @@
                 'webtranslate', 'wtEngine', 'wtMinInterval', 'wt-test', 'wt-status',
                 'umionly', 'umiBase', 'umiLang', 'umi-test', 'umi-status',
                 'captureMode', 'sharescreen', 'stopscreen', 'capture-hint',
-                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'sim', 'simVal',
+                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
                 'fontSize', 'fontVal', 'bgOpacity', 'opacityVal', 'offsetY', 'offsetVal',
                 'textColor', 'outline', 'showOriginal', 'overlayTop',
                 'extraPrompt', 'thinkingMode', 'thinking-hint', 'maxTokens',
@@ -410,6 +410,8 @@
                     'textColor', 'outline', 'offsetY'].includes(key)) {
                     Overlay.clear();
                     Overlay.last = null;
+                    // 外观变了要重画，但画面本身没变 —— 只作废缩略图记录，
+                    // 保留 lastSentThumb 免得为同一帧再买一次识别
                     Pipeline.lastThumb = null;
                     Pipeline.lastOriginal = '';
                 }
@@ -419,6 +421,9 @@
                     cache.clear();
                     Pipeline.lastOriginal = '';
                     Pipeline.lastTranslation = '';
+                    // 换了引擎 / 语言，同一帧也要重新识别一次（结果会不同），
+                    // 所以这里必须连 lastSentThumb 一起清 —— 否则静止画面会一直跳过。
+                    Pipeline.lastSentThumb = null;
                 }
             };
 
@@ -470,6 +475,7 @@
             bindInput('thinkingMode', e.thinkingMode);
             bindInput('maxTokens', e.maxTokens, Number);
             bindInput('smartSkip', e.smartSkip, () => e.smartSkip.checked);
+            bindInput('pauseWhenHidden', e.pauseWhenHidden, () => e.pauseWhenHidden.checked);
             bindInput('showOriginal', e.showOriginal, () => e.showOriginal.checked);
             bindInput('overlayTop', e.overlayTop, () => e.overlayTop.checked);
             bindInput('outline', e.outline, () => e.outline.checked);
@@ -1082,6 +1088,7 @@
             e.tgtLang.value = CFG.tgtLang;
             e.interval.value = CFG.interval;
             e.smartSkip.checked = !!CFG.smartSkip;
+            e.pauseWhenHidden.checked = !!CFG.pauseWhenHidden;
             e.sim.value = CFG.textSimThreshold;
             e.simVal.textContent = Number(CFG.textSimThreshold).toFixed(2);
             e.captureMode.value = CFG.captureMode || 'auto';

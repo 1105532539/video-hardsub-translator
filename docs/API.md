@@ -467,7 +467,7 @@ H.version;              // '1.12.0'
 | `version` | 脚本版本字符串 |
 | `CFG` | **活的**配置对象（修改后记得调用 `saveCfg()` 落盘） |
 | `DEFAULTS` | 默认值对象（运行时不可被污染） |
-| `ENGINES` | `['openai-vision', 'umi-ocr', 'youdao-img']` |
+| `ENGINES` | `['openai-vision', 'umi-ocr', 'youdao-img', 'browser-ai', 'web-translate']` |
 
 ### 2.2 核心模块
 

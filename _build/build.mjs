@@ -23,6 +23,11 @@
  *    4. 依赖的名字确实有模块提供（挡住拼写错误）
  *    5. package.json / @version / SCRIPT_VERSION 三处版本号一致
  *    6. 产物能通过语法解析（vm.Script，只解析不执行）
+ *
+ *  另外会做一项**只警告、不阻断**的对账（见第 3b 节）：
+ *    模块头的「依赖」与代码实际使用是否一致（声明了没用 / 用了没声明）。
+ *    之所以先不阻断：98-boot.js 的 window.__H1SUB__ 调试钩子重导出了上百个
+ *    名字，声明补齐之前直接报错会让构建无法通过。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -81,7 +86,11 @@ function headerField(text, label) {
         out.push(line);
     }
     const names = out.join('').split('、').map((s) => s.trim()).filter(Boolean);
-    return names.length === 1 && names[0] === '无' ? [] : names;
+    if (names.length === 1 && names[0] === '无') return [];
+    // 「依赖：*」= 通配（见 98-boot.js 的说明）。此时后面通常还跟着一段解释性
+    // 注释，会被上面的循环一并收进来，所以只要开头是 * 就整体当作通配。
+    if (names.length && names[0].charAt(0) === '*') return ['*'];
+    return names;
 }
 
 // ── 3. 扫描每个模块定义的顶层绑定（IIFE 内缩进 4 空格）────────────────
@@ -89,9 +98,79 @@ function headerField(text, label) {
 const DECL = /^ {4}((?:async\s+)?function|class|const|let|var)\s+(.*)$/;
 const BARE_ASSIGN = /^ {4}([A-Za-z_$][\w$]*)\s*=[^=]/;
 
+/**
+ * 把注释、字符串与正则字面量替换成等长空白（保留换行与列位置）。
+ * 两个用途：① 顶层绑定扫描不被注释里的假代码骗到；② 依赖使用情况扫描
+ * 不被字符串 / 注释里的同名词误判。
+ *
+ * ⚠️ 正则字面量必须单独处理：`/[&<>"]/g` 里的引号是**正则的一部分**，
+ *    若当成字符串起点会一路吞掉后面成片的代码（本文件早期版本就踩过）。
+ *    判别用通行启发式：`/` 前面是「期待表达式」的符号时才算正则。
+ */
+const REGEX_PRECEDERS = new Set([
+    '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';',
+    '+', '-', '*', '%', '~', '^', '<', '>', '\n',
+]);
+
+function blankOut(text) {
+    let out = '';
+    let i = 0;
+    const n = text.length;
+    let prev = '';                    // 上一个「有意义的」字符，供正则判别用
+    const pad = (from, to) => { for (let k = from; k < to; k++) out += (text[k] === '\n' ? '\n' : ' '); };
+
+    while (i < n) {
+        const c = text[i], c2 = text[i + 1];
+
+        if (c === '/' && c2 === '*') {                              // 块注释
+            const end = text.indexOf('*/', i + 2);
+            const stop = end < 0 ? n : end + 2;
+            pad(i, stop);
+            i = stop;
+            prev = '\n';
+        } else if (c === '/' && c2 === '/') {                       // 行注释
+            const end = text.indexOf('\n', i);
+            const stop = end < 0 ? n : end;
+            pad(i, stop);
+            i = stop;
+            prev = '\n';
+        } else if (c === '/' && (prev === '' || REGEX_PRECEDERS.has(prev))) {
+            let j = i + 1, inClass = false;
+            while (j < n) {
+                const d = text[j];
+                if (d === '\\') { j += 2; continue; }
+                if (d === '\n') break;                              // 正则不跨行，防跑飞
+                if (d === '[') inClass = true;
+                else if (d === ']') inClass = false;
+                else if (d === '/' && !inClass) { j++; break; }
+                j++;
+            }
+            pad(i, j);
+            i = j;
+            prev = '/';
+        } else if (c === '\'' || c === '"' || c === '`') {          // 字符串 / 模板串
+            const quote = c;
+            let j = i + 1;
+            while (j < n) {
+                if (text[j] === '\\') { j += 2; continue; }
+                if (text[j] === quote) { j++; break; }
+                j++;
+            }
+            pad(i, j);
+            i = j;
+            prev = quote;
+        } else {
+            out += c;
+            if (!/\s/.test(c)) prev = c;
+            i++;
+        }
+    }
+    return out;
+}
+
 function topLevelNames(text) {
     const names = [];
-    for (const line of text.split('\n')) {
+    for (const line of blankOut(text).split('\n')) {
         const m = DECL.exec(line);
         if (m) {
             const kind = m[1], rest = m[2];
@@ -115,6 +194,36 @@ function topLevelNames(text) {
         if (asg) names.push(asg[1]);
     }
     return names;
+}
+
+/** 模块里「用到」了哪些标识符（去注释/字符串/正则后按词法切分） */
+function usedNames(text) {
+    const clean = blankOut(text);
+    const used = new Set();
+    const re = /[A-Za-z_$][\w$]*/g;
+    let m;
+    while ((m = re.exec(clean))) {
+        const name = m[0];
+        // ① 前面是 . 或 ?. → 属性访问，不是对外部名字的使用
+        //    注意：不能用 [.\w$]? 这类前缀字符组去"顺手"吃掉点号 —— \w 会把
+        //    标识符的首字母也吃掉（CFG 会被切成 C + FG），本文件踩过这个坑。
+        let k = m.index - 1;
+        while (k >= 0 && (clean[k] === ' ' || clean[k] === '\t')) k--;
+        if (k >= 0 && clean[k] === '.') continue;
+
+        // ② 形如 `{ foo: 1 }` / `, foo: 1` 的对象字面量键 → 不是使用
+        //    只在前面确实是 { 或 , 时才判为键，避免把三元 `a ? b : c` 的 b 误伤
+        let after = m.index + name.length;
+        let j = after;
+        while (j < clean.length && (clean[j] === ' ' || clean[j] === '\t')) j++;
+        if (clean[j] === ':') {
+            let b = k;
+            while (b >= 0 && /\s/.test(clean[b])) b--;
+            if (b >= 0 && (clean[b] === '{' || clean[b] === ',')) continue;
+        }
+        used.add(name);
+    }
+    return used;
 }
 
 const owner = new Map();          // 顶层名字 → 模块文件名
@@ -147,7 +256,48 @@ for (const mod of modules) {
 
 for (const mod of modules) {
     for (const n of mod.deps || []) {
+        if (n === '*') continue;                 // 通配，见 98-boot.js
         if (!providesAll.has(n)) fail(`${mod.file} 依赖 ${n}，但没有任何模块声称提供它（拼写错误？）`);
+    }
+}
+
+// ── 3b. 依赖声明与代码实际使用是否对得上（**只警告、不阻断**）────────
+//  为什么是警告而不是错误：98-boot.js 的 window.__H1SUB__ 调试钩子从每个模块
+//  重导出上百个名字，它的模块头不可能逐个声明。直接开成错误会让构建立刻失败，
+//  所以先以警告落地，等声明补齐后再考虑转成错误。
+//  两类问题都要报：
+//    ① 声明了却没用到  —— 声明写错了文件（见下），或改名后忘了同步
+//    ② 用到了却没声明  —— 契约漏写，模块地图会慢慢失真
+const depWarnings = [];
+
+for (const mod of modules) {
+    if (mod.file === '00-header.js') continue;
+
+    // 「依赖：*」= 声明使用全部模块的名字。只有 98-boot.js 的 window.__H1SUB__
+    // 调试钩子用：它是一个刻意的测试接口，从每个模块重导出上百个名字，
+    // 逐条列进模块头既无意义也没人维护。见 docs/API.md「内部 JS API」。
+    if ((mod.deps || []).includes('*')) continue;
+
+    const used = usedNames(mod.text);
+    const declaredSet = new Set(mod.deps || []);
+
+    for (const n of mod.deps || []) {
+        if (!used.has(n)) {
+            depWarnings.push(`${mod.file} 声明依赖 ${n}，但模块里没有用到它`
+                + (providesAll.has(n) ? '（是不是声明写错了文件？）' : ''));
+        }
+    }
+
+    // 只统计「别的模块提供、本模块使用」的名字；本模块自己定义的不算
+    const missing = [];
+    for (const n of used) {
+        if (declaredSet.has(n)) continue;
+        const provider = owner.get(n);
+        if (!provider || provider === mod.file) continue;   // 没人提供 = 全局/浏览器 API
+        missing.push(n + '(' + provider + ')');
+    }
+    if (missing.length) {
+        depWarnings.push(`${mod.file} 用到但未声明：${missing.join('、')}`);
     }
 }
 
@@ -263,3 +413,10 @@ if (changed || verbose) {
 }
 
 console.log('\n检查通过：模块命名与编号、对外提供与依赖声明、顶层名字唯一性、版本号一致性、语法解析。');
+
+// 依赖声明与使用情况的对账结果（只警告）——放在最后，免得刷屏盖住主要结论
+if (depWarnings.length) {
+    console.log('\n⚠️  依赖声明对账（' + depWarnings.length + ' 条，不影响构建）：');
+    for (const w of depWarnings) console.log('   · ' + w);
+    console.log('   （模块头的「依赖」应与代码实际使用一致；见 docs/ARCHITECTURE.md 模块地图）');
+}

@@ -209,7 +209,7 @@ tick()                          ← setTimeout 驱动，间隔 CFG.interval（�
 
 ### 为什么把 `step()` 拆成这么多小方法
 
-这一整套流程原本挤在一个约 160 行的方法里，想给任何一处守卫加日志都得先通读全文。现在 `step()` 只剩 6 行主体，每个分支的进入条件与返回值语义都能从方法名读出来：
+这一整套流程原本挤在一个约 160 行的方法里，想给任何一处守卫加日志都得先通读全文。现在 `step()` 只剩十来个语句（`70-pipeline.js:164-180`），每个分支的进入条件与返回值语义都能从方法名读出来：
 
 | 方法 | 返回 `false` / `null` 的含义 |
 | --- | --- |
@@ -292,12 +292,15 @@ if (sw * scale > 1400) scale = 1400 / sw;         // 宽度封顶 1400
 | 字段 | 作用 |
 | --- | --- |
 | `running` | 用户意图：是否处于运行状态 |
-| `busy` | 上一轮请求是否仍在飞（防止请求堆积） |
+| `busy` | 上一轮请求是否仍在飞（防止请求堆积；`stop()` 会清掉它） |
 | `timer` | `setTimeout` 句柄 |
-| `gen` | **代**计数器，每次 start/stop/换区域 +1 |
-| `lastThumb` | 上一帧缩略图（变化检测基准） |
+| `gen` | **代**计数器，每次 start/stop/换区域/暂停 +1 |
+| `lastThumb` | 上一帧缩略图（变化检测基准）。**只在没被跳过时更新** |
+| `lastSentThumb` | 上一次**花钱识别过**的那一帧（跳过判据用它，与识别结果解耦） |
 | `lastOriginal` / `lastTranslation` | 上一句原文/译文（去重与回退基准） |
 | `emptyStreak` | 连续空帧计数（连续 2 帧才清空字幕，避免闪烁） |
+| `hiddenPaused` | 是否因切到后台而暂停（区分「用户按了停止」与「只是切走了」） |
+| `failStreak` | 连续失败次数（指数退避用，成功一次即清零） |
 | `missVideo` | 连续找不到视频的轮数（30 轮后自动停止） |
 | `stats` | `{shots, apiCalls, skipped, errors}` |
 
@@ -316,7 +319,18 @@ if (myGen !== this.gen || !this.running) {
 
 ### 错误处理与退避
 
-`tick()` 捕获 `step()` 的异常：计入 `stats.errors`、写入 `Diag.lastError`（带栈顶 3 行）、状态栏显示 `出错：…`，然后 **`await sleep(1500)`** 再排下一轮——连续出错时不会把状态栏刷爆。
+`tick()` 捕获 `step()` 的异常：计入 `stats.errors` 与 `failStreak`、写入 `Diag.lastError`（带栈顶 3 行），然后按**错误类型**决定等多久再排下一轮（`classifyError()` + `backoffDelay()`）：
+
+| 类型 | 判定 | 退避 |
+| --- | --- | --- |
+| `ratelimit` | 429 / 频率限制 | 指数退避 1s→2s→4s…**封顶 60s** |
+| `quota` | 402 余额不足 | 同上（封顶 60s） |
+| `network` | 5xx / 超时 / 断网 | 指数退避，**封顶 15s** |
+| `config` | 401 / 403 / 404（Key、地址、模型名写错） | **不退避，直接停止**并提示去改配置 |
+
+判类型优先读异常上的 `httpStatus`（`callChatCore` 会挂上），拿不到才退回文案匹配 ——
+比事后拿报错文案做正则可靠（文案随时会改）。配置类错误重试永远不会好，继续重试
+只会一直刷屏烧请求，所以直接停。
 
 ### 跳过判定（省钱核心）
 
@@ -328,7 +342,12 @@ if (myGen !== this.gen || !this.running) {
 | 2 | 160×48 边缘密度 | `< 0.035` 视为无文字 | 低 |
 | — | 文本相似度（在 `present()` 中） | `sim > 1 - 0.28 = 0.72` 视为同一句 | 低 |
 
-第 1 步命中且 `lastOriginal` 非空时**直接返回**——预览重绘也一并跳过（画面一模一样时重画 `drawImage` 纯属浪费）。
+第 1 步命中且 `lastSentThumb` 非空时**直接返回** —— 预览重绘也一并跳过（画面一模一样时重画 `drawImage` 纯属浪费）。
+
+> 判据用的是 `lastSentThumb`（上一次**花钱识别过**的那一帧），**不是** `lastOriginal`。
+> 后者会在识别结果为空时被 `present()` 清成 `''`，于是「画面静止 + 边缘密度够高 +
+> 认不出文字」会让跳过永久失效，同一张逐像素相同的图被反复送去付费识别。
+> 用 `lastSentThumb` 就与识别结果解耦了：同一张图只买一次，无论买回来的是不是空。
 
 第 2 步命中会累加 `emptyStreak`，连续 ≥2 帧才清空悬浮层，避免字幕一闪一闪。
 
@@ -344,11 +363,21 @@ if (myGen !== this.gen || !this.running) {
 ### 生命周期
 
 ```
-start()  → 校验已框选 → invalidate() → running=true → 复位 lastThumb/emptyStreak → tick()
-stop()   → running=false → invalidate() → 清定时器 → Overlay.clear()
-           → 清 lastOriginal/lastTranslation（否则重新开始后第一句会被误判重复）
+start()  → 校验已框选 → invalidate() → running=true → 复位 lastThumb/emptyStreak/failStreak → tick()
+stop()   → running=false → invalidate() → 清定时器 → busy=false
+           → Overlay.clear() → 清 lastOriginal/lastTranslation/lastSentThumb/emptyStreak
 toggle() → running ? stop() : start()
+
+pauseForHidden()  → hiddenPaused=true → invalidate() → 清定时器（**不算停止**，保留 running 与 lastSentThumb）
+resumeFromHidden()→ hiddenPaused=false → invalidate() → 若仍在运行则继续 tick()
 ```
+
+`stop()` 必须把 `lastSentThumb` 与 `lastOriginal` **一起**清掉：前者标记「这一帧已经
+买过了」，而后者刚被丢弃。只清后者会让重开后的静止画面被判成"已买过"而跳过 ——
+既不识别、悬浮层也没内容，用户看到一片空白。
+
+`pauseForHidden()` 相反地**要保留**它们：后台暂停只是没人在看，切回来画面多半没变，
+没必要为同一帧再花一次钱。两者的差异是刻意的，别顺手"统一"掉。
 
 ---
 
@@ -601,7 +630,7 @@ fullscreenchange
 - 相似度 DP 交换长短串只影响滚动行长度，编辑距离与 `1 - dist/max(m,n)` 都是对称的；
 - 画布复用不改变任何调用方的可观察行为（全部"拿到即用"）。
 
-回归验证：**444 项端到端测试全部通过**，A/B 基准无指标回退。
+回归验证：**523 项端到端测试全部通过**，A/B 基准无指标回退。
 
 ---
 
@@ -676,7 +705,7 @@ async function recognizeAndTranslate(canvas, opts) {
 
 **4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS` 并把枚举值纳入 `sanitizeCfg()` 的兜底），然后在 `UI.syncEngineUI()` 里控制其显隐。
 
-**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 444 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
+**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 523 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
 
 ---
 

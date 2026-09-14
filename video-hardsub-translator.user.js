@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网页视频硬字幕实时翻译（OCR + 第三方大模型 API）
 // @namespace    https://github.com/1105532539/video-hardsub-translator
-// @version      1.12.0
+// @version      1.13.0
 // @description  任意网站通用：框选视频硬字幕区域，定时截图 → OCR → 第三方大模型 API 或浏览器内置端侧模型翻译成中文 → 悬浮字幕显示
 // @author       1105532539
 // @license      GPL-3.0-or-later
@@ -36,10 +36,10 @@
  * ─────────────────────────────────────────────────────────────────────
  *  1. 你在页面上框选「硬字幕所在的区域」
  *  2. 脚本每隔 N 毫秒把该区域截成图片
- *  3. 图片交给 AI（四种引擎，见下）得到中文译文
+ *  3. 图片交给 AI（五种引擎，见下）得到中文译文
  *  4. 译文以悬浮字幕的形式盖在视频上
  *
- *  四种识别引擎（面板里可选）：
+ *  五种识别引擎（面板里可选）：
  *    openai-vision（默认）：把截图直接发给「视觉大模型」，一步完成
  *                        OCR + 翻译。对动画风格的描边/艺术字识别率高，
  *                        只需一次 API 调用。需要支持图片输入的模型。
@@ -54,10 +54,13 @@
  *                        多模态模型读图；翻译走端侧翻译模型。
  *                        代价：首次要点一次「准备离线模型」下载语言包，
  *                        且跨域 iframe 里的播放器默认用不了。
+ *    web-translate（免 Key）：本机 Umi-OCR 识别 → 逆向免费网页接口翻译。
+ *                        不用填任何 Key，但那些是各家**内部接口**、随时可能
+ *                        失效，服务条款通常不允许第三方调用，仅建议自用。
  *    youdao-img：有道图片翻译 API，同样是 OCR + 翻译一步到位，
  *                        按量计费（不是免费额度）。
  *
- *  前三种引擎都**不需要浏览器下载任何模型**。
+ *  前四种引擎都**不需要浏览器下载任何模型**。
  *
  *  ⚠️ 关于「思考模式」（思维链）：
  *    DeepSeek V4.1-Flash 默认开启思考模式，模型会先输出一大段推理再给答案。
@@ -197,6 +200,7 @@
         regionsByHost: {},                      // 按网站分别记住框选区域 { hostname: region }
         captureMode: 'auto',                    // auto | element | display
         smartSkip: true,                        // 无文字时跳过 API 调用（省钱）
+        pauseWhenHidden: true,                  // 切到后台标签页时暂停（视频在后台仍会播放，不暂停就是白烧钱）
         textSimThreshold: 0.28,                 // 文本相似度阈值(0~1)，越高越不容易重复翻译
 
         // ---- 全站运行的开关 ----
@@ -237,7 +241,7 @@
         return sanitizeCfg(cfg);
     }
 
-    /** 当前支持的四种引擎 */
+    /** 当前支持的五种引擎（与 00-header.js 的说明、面板 <select> 的选项一一对应） */
     const ENGINES = ['openai-vision', 'umi-ocr', 'youdao-img', 'browser-ai', 'web-translate'];
 
     // web-translate 的接口选择，和面板上的 <option> 一一对应
@@ -275,6 +279,11 @@
         if (BAI_TRANS_CHOICES.indexOf(cfg.baiTrans) < 0) cfg.baiTrans = DEFAULTS.baiTrans;
         cfg.baiStream = !!cfg.baiStream;
         cfg.baiPivot = cfg.baiPivot === undefined ? DEFAULTS.baiPivot : !!cfg.baiPivot;
+        // 布尔开关统一强转：导入的 JSON 里可能是 "false" / 0 / null，
+        // 用 !! 会把字符串 "false" 变成 true，所以显式按默认值兜底
+        cfg.smartSkip = cfg.smartSkip === undefined ? DEFAULTS.smartSkip : !!cfg.smartSkip;
+        cfg.pauseWhenHidden = cfg.pauseWhenHidden === undefined
+            ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
 
         for (const k in NUM_RANGES) {
@@ -288,6 +297,20 @@
         if (typeof cfg.textColor !== 'string' || !/^#[0-9a-fA-F]{3,8}$/.test(cfg.textColor)) {
             cfg.textColor = DEFAULTS.textColor;
         }
+
+        // ── 字符串型字段：URL 形状与长度兜底 ──
+        //  这几个值都会在运行时被直接拿去拼请求，非法值会在热路径上抛错
+        //  （而且每次重试都抛），不如加载时就兜回默认。
+        cfg.apiBase = sanitizeUrl(cfg.apiBase, DEFAULTS.apiBase, { allowEmpty: true });
+        cfg.umiBase = sanitizeUrl(cfg.umiBase, DEFAULTS.umiBase);
+        cfg.model = typeof cfg.model === 'string' && cfg.model.trim()
+            ? cfg.model.trim().slice(0, 200)
+            : DEFAULTS.model;
+        // 额外提示词会被拼进 system prompt：太长会挤掉输出预算，所以限长
+        cfg.extraPrompt = typeof cfg.extraPrompt === 'string'
+            ? cfg.extraPrompt.slice(0, 2000) : DEFAULTS.extraPrompt;
+        cfg.apiKey = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : DEFAULTS.apiKey;
+
         if (cfg.region && typeof cfg.region === 'object') {
             const g = cfg.region;
             // ⚡ 优化：原来是「四个坐标塞进临时数组、再用数组方法逐个判断」的写法，
@@ -301,9 +324,40 @@
             cfg.region = null;
         }
         if (!Array.isArray(cfg.apiProfiles)) cfg.apiProfiles = [];
+        // 逐项过滤：导入的 JSON 里可能塞进 null / 字符串 / 缺字段的对象，
+        // 面板渲染配置列表时会在这些项上炸掉（原来只判了"是不是数组"）
+        cfg.apiProfiles = cfg.apiProfiles.filter(p => p && typeof p === 'object'
+            && typeof p.name === 'string' && p.name.trim()).map(p => ({
+                name: String(p.name).trim().slice(0, 60),
+                apiBase: sanitizeUrl(p.apiBase, DEFAULTS.apiBase, { allowEmpty: true }),
+                apiKey: typeof p.apiKey === 'string' ? p.apiKey.trim() : '',
+                model: typeof p.model === 'string' ? p.model.trim().slice(0, 200) : '',
+                thinkingMode: p.thinkingMode,
+                maxTokens: p.maxTokens,
+            }));
         if (!Array.isArray(cfg.disabledHosts)) cfg.disabledHosts = [];
-        if (!cfg.regionsByHost || typeof cfg.regionsByHost !== 'object') cfg.regionsByHost = {};
+        // 只保留非空字符串，避免导入的脏数据让 isHostDisabled 永远匹配不上
+        cfg.disabledHosts = cfg.disabledHosts.filter(h => typeof h === 'string' && h.trim())
+            .map(h => h.trim());
+        if (!cfg.regionsByHost || typeof cfg.regionsByHost !== 'object'
+            || Array.isArray(cfg.regionsByHost)) cfg.regionsByHost = {};
         return cfg;
+    }
+
+    /**
+     * 规整一个「服务地址」配置项：去空白、去尾斜杠，并校验形状。
+     * 非 http(s) 的值一律兜回默认 —— 否则运行时会拼出 `undefined/chat/completions`
+     * 这种地址，每轮重试都抛一次，用户只看到状态栏一直红。
+     * @param {string} v
+     * @param {string} fallback 非法时用的默认值
+     * @param {{allowEmpty?:boolean}} [opts] allowEmpty：空串是合法的（表示"用默认"）
+     */
+    function sanitizeUrl(v, fallback, opts) {
+        const allowEmpty = !!(opts && opts.allowEmpty);
+        const s = String(v == null ? '' : v).trim();
+        if (!s) return allowEmpty ? '' : fallback;
+        if (!/^https?:\/\/[^\s/]+/i.test(s)) return fallback;
+        return s.replace(/\/+$/, '').slice(0, 500);
     }
 
     function saveCfg(cfg) {
@@ -420,7 +474,8 @@
     // ═══════════════════════════════════════════════════════════════
     //  14-constants.js — 热路径常量与配色
     //
-    //  截图循环每 1.2 秒走一遍，魔数集中在这里便于调参。
+    //  截图循环默认每 1.2 秒走一遍（`CFG.interval`；出错退避、切到后台、
+    //  视频暂停时会变慢或停下），魔数集中在这里便于调参。
     //
     //  对外提供：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD、EDGE_MIN、
     //              NO_CHANGE_DIFF、STATUS_COLORS
@@ -681,7 +736,7 @@
     //  离屏画布与 DP 滚动行缓冲都复用，不每轮新建。
     //
     //  对外提供：thumbnail、thumbDiff、edgeDensity、textSimilarity
-    //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD、EDGE_MIN
+    //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD
     // ═══════════════════════════════════════════════════════════════
     /**
      * 复用的离屏画布。这两个函数每轮（约 1.2 秒）各调一次，原来每次都在新建
@@ -803,7 +858,7 @@
     //  32-util.js — 通用小工具
     //
     //  对外提供：parseModelJson、sleep、canvasToJpeg、stripDataUrlPrefix、
-    //              stripWrappingQuotes、LANG_ALIASES、langCode
+    //              stripWrappingQuotes、classifyError、LANG_ALIASES、langCode
     //  依赖：无
     // ═══════════════════════════════════════════════════════════════
     /** 从模型返回里尽力抠出 JSON */
@@ -818,7 +873,48 @@
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-    /** canvas → JPEG data URL。三种引擎最后都走这一步，质量参数按引擎调过 */
+    /**
+     * 把一次失败归类，供主循环决定「退避重试」还是「停下来让用户改配置」。
+     *
+     * 优先用异常上带的 `httpStatus`（60-chat.js 的 callChatCore 会挂上去），
+     * 拿不到再退回文案匹配 —— Umi-OCR / 有道 / 免费网页接口那几条路径没带状态码。
+     *
+     * @returns {'config'|'quota'|'ratelimit'|'network'|'other'}
+     *   config    = 配置错了，重试永远不会好（Key / 地址 / 模型名 / 未授权）
+     *   quota     = 余额或额度问题（402），重试也没用但要给用户时间充值
+     *   ratelimit = 429 / 频率限制，退避后通常能恢复
+     *   network   = 超时 / 断网 / 5xx，多半是暂时的
+     */
+    function classifyError(e) {
+        const status = Number(e && e.httpStatus);
+        if (Number.isFinite(status) && status > 0) {
+            if (status === 429 || status === 1411) return 'ratelimit';
+            if (status === 402) return 'quota';
+            if (status === 401 || status === 403 || status === 404) return 'config';
+            if (status >= 500) return 'network';
+            if (status >= 400) return 'other';
+        }
+
+        const m = String((e && e.message) || e || '');
+        if (/请求超时|超时|timeout|网络请求失败|NetworkError|Failed to fetch/i.test(m)) return 'network';
+        if (/额度|余额|欠费|402/.test(m)) return 'quota';
+        if (/太频繁|频率受限|429|1411/.test(m)) return 'ratelimit';
+        if (/API Key|appKey|appSecret|未填|地址|模型名|401|403|404|110|108|202|205/i.test(m)) return 'config';
+        if (/HTTP 5\d\d/.test(m)) return 'network';
+        return 'other';
+    }
+
+    /**
+     * canvas → JPEG data URL。
+     *
+     * 质量参数按**去哪**而定，不是随手写的（实测：1400×116 的字幕条在这个区间里，
+     * 0.9 的产物约 85 KB，0.85 省 15%，0.95 多 27%，1.0 直接翻到 3 倍）：
+     *   - 0.85  openai-vision —— **唯一真正上传到付费云端的**那条路，取最省的一档
+     *   - 0.90  youdao-img —— 按量计费，同样要省
+     *   - 0.92  umi-ocr / web-translate / browser-ai（配 Umi-OCR 时）——
+     *           只发给 `127.0.0.1` 的本机服务，不出设备、不按字节计费，所以给高一点换识别率
+     * 端侧读图那条路不走这里（它用 `toBlob`，压根不经过网络）。
+     */
     function canvasToJpeg(canvas, quality) {
         return canvas.toDataURL('image/jpeg', quality);
     }
@@ -1957,7 +2053,10 @@
     // ── 识别 ─────────────────────────────────────────────────
 
     /** 画布 → Blob。转一手是为了**快照**：captureMode 下画布是复用的，直接把 canvas 交给异步的
-     *  模型调用，像素可能已经被下一帧盖掉。 */
+     *  模型调用，像素可能已经被下一帧盖掉。⚠️ 调用方必须在 await 任何东西**之前**调用它
+     *  （见 baiOcrByBuiltin 里的说明），否则这个快照本身就失去意义。
+     *  质量取 0.9：产物只喂给端侧模型，**不经过网络、不按字节计费**，所以不必像
+     *  上传云端那几条路一样压到 0.85（详见 32-util.js 的 canvasToJpeg）。 */
     function baiCanvasBlob(canvas) {
         return new Promise((resolve, reject) => {
             let done = false;
@@ -1990,8 +2089,14 @@
     }
 
     async function baiOcrByBuiltin(canvas) {
-        const session = await baiOcrSession();
+        // ⚠️ 顺序很重要：必须**先**把画布转成 blob（= 快照），再 await 会话。
+        //    captureMode 下 canvas 是复用画布（Capturer._out），而 baiOcrSession()
+        //    首次调用可能要去初始化/加载模型、耗时数秒；在它让出事件循环期间，
+        //    UI.manualShot() 或框选拖拽的预览截图会把同一张画布的像素盖掉 ——
+        //    那样识别到的就是**另一帧**，属于静默出错（本项目最忌讳的那类）。
+        //    原来这两行是反的，与 baiCanvasBlob 上方"转一手是为了快照"的注释自相矛盾。
         const blob = await baiCanvasBlob(canvas);
+        const session = await baiOcrSession();
         let out;
         try {
             out = await session.prompt([{
@@ -2598,7 +2703,11 @@
             else if (r.status === 404) msg += '　→ API 地址或模型名不对';
             else if (r.status === 429) msg += '　→ 请求太频繁或额度用尽，试试调大截图间隔';
             else if (/model/i.test(msg) && r.status === 400) msg += '　→ 模型名可能写错了';
-            throw new Error(msg);
+            // 带上 HTTP 状态码：主循环据此区分「该退避重试」还是「该让用户改配置」，
+            // 比事后拿报错文案做正则匹配可靠（文案随时会改）。
+            const err = new Error(msg);
+            err.httpStatus = r.status;
+            throw err;
         }
         let j;
         try { j = JSON.parse(r.responseText); }
@@ -2729,7 +2838,8 @@
     //
     //  对外提供：Pipeline
     //  依赖：CFG、Capturer、UI、Overlay、Diag、recognizeAndTranslate、thumbnail、
-    //              thumbDiff、edgeDensity、textSimilarity、sleep、findVideo、log、warn
+    //              thumbDiff、edgeDensity、textSimilarity、classifyError、findVideo、
+    //              log、warn、NO_CHANGE_DIFF、EDGE_MIN
     // ═══════════════════════════════════════════════════════════════
     const Pipeline = {
         running: false,
@@ -2738,12 +2848,36 @@
         // 每次 start / stop / 换区域都 +1；异步结果回来时对不上就说明这次识别已作废，直接丢掉。
         gen: 0,
         lastThumb: null,
+        // 「上一次**实际送出去识别**的那一帧」。两者的区别很关键：
+        //   lastThumb      = 上一次**进到「该不该跳过」判断**的帧，用于比对画面有没有变
+        //   lastSentThumb  = 上一次**花了钱识别过**的帧
+        // 注意 lastThumb 只在「没被跳过」时更新（见 shouldSkipFrame 末尾），
+        // 跳过的那一轮不刷新 —— 否则每次都拿刚存下的自己跟自己比，变化检测会失效。
+        //
+        // 跳过的判据用 lastSentThumb，才能覆盖「画面静止但识别不出文字」的情况：
+        // 那种情况下 lastOriginal 恒为空，用它会让同一张图被反复送去付费识别（见 P0-1）。
+        lastSentThumb: null,
         lastOriginal: '',
         lastTranslation: '',
         emptyStreak: 0,
+        // 后台标签页暂停期间为 true；用来区分「用户按了停止」和「只是切走了」
+        hiddenPaused: false,
+        // 连续失败次数，用于指数退避（成功一次即清零）
+        failStreak: 0,
         stats: { shots: 0, apiCalls: 0, skipped: 0, errors: 0 },
 
         invalidate() { this.gen++; },
+
+        /** 把「与上一帧有关」的状态一次清干净：换区域 / SPA 跳页 / 改配置后都该调它。
+         *  以前这段是手工复制在 4 个调用点上的，容易漏（漏了会把新句当成重复句吞掉）。 */
+        resetFrameState() {
+            this.lastThumb = null;
+            this.lastSentThumb = null;
+            this.lastOriginal = '';
+            this.lastTranslation = '';
+            this.emptyStreak = 0;
+            this.invalidate();
+        },
 
         start() {
             if (this.running) return;
@@ -2755,6 +2889,7 @@
             this.running = true;
             this.lastThumb = null;
             this.emptyStreak = 0;
+            this.failStreak = 0;      // 重开就重置退避，别继承上一次的惩罚
             UI.setRunning(true);
             UI.setStatus('运行中…', 'ok');
             this.tick();
@@ -2764,11 +2899,20 @@
             this.running = false;
             this.invalidate();
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            // 清 busy：否则在飞请求返回前（最长一次 GM 超时）重新点「开始」会被
+            // ensureReady 里的 busy 判断静默吞掉，表现成"点了没反应"。
+            // 安全性由 gen 保证 —— 迟到的结果对不上代，本来就会被丢弃。
+            this.busy = false;
             // 停止要收掉字幕：不然最后一句一直挂着，用户以为还在翻译（换集 / 暂停时尤其容易误会）。
             // 「上一句」也得清 —— 否则重开后与停之前相同的首句会被当成重复句直接吞掉。
             Overlay.clear();
             this.lastOriginal = '';
             this.lastTranslation = '';
+            // ⚠️ lastSentThumb 必须跟着一起清：它标记的是"这一帧已经买过了"，
+            // 而上面刚把结果（lastOriginal / lastTranslation）丢掉。若保留它，
+            // 重开后遇到静止画面会被判成"已买过"而跳过 —— 结果就是既不识别、
+            // 悬浮层也没内容可显示，用户看到一片空白。（这是本轮引入又修掉的回归。）
+            this.lastSentThumb = null;
             this.emptyStreak = 0;
             UI.setRunning(false);
             UI.setStatus('已停止', 'idle');
@@ -2776,27 +2920,74 @@
 
         toggle() { this.running ? this.stop() : this.start(); },
 
-        async tick() {
+        /**
+         * 切到后台：暂停主循环，但**不算停止** —— 保留 running 与 lastSentThumb，
+         * 这样切回来能接着跑，且画面没变时不必重新花钱。
+         * 之所以必须专门处理：视频在后台标签页会继续播放，`video.paused` 是 false，
+         * 现有那道闸门拦不住 —— 会一直截图并调用付费接口，而没人看得到结果。
+         */
+        pauseForHidden() {
+            if (!this.running || this.hiddenPaused) return;
+            this.hiddenPaused = true;
+            this.invalidate();                 // 作废在飞结果
+            if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            UI.setStatus('已切到后台，暂停翻译（切回本标签页自动继续）', 'idle');
+        },
+
+        /** 切回前台：接着跑。没在运行、或不是被后台暂停的，都不动。 */
+        resumeFromHidden() {
+            if (!this.hiddenPaused) return;
+            this.hiddenPaused = false;
             if (!this.running) return;
+            this.invalidate();
+            UI.setStatus('已回到前台，继续翻译…', 'ok');
+            if (!this.timer) this.tick();
+        },
+
+        /** 本次失败后应该等多久再试（按错误类型区分；见 P0-3） */
+        backoffDelay(e) {
+            const kind = classifyError(e);
+            // 配置类错误重试没有意义：退避到很慢，避免一直刷屏烧请求
+            if (kind === 'config') return 60000;
+            const base = (kind === 'ratelimit' || kind === 'quota') ? 1000 : 500;
+            const cap = (kind === 'ratelimit' || kind === 'quota') ? 60000 : 15000;
+            const n = Math.min(this.failStreak, 6);          // 1s→2s→4s…→32s（封顶见 cap）
+            return Math.min(cap, base * Math.pow(2, n));
+        },
+
+        async tick() {
+            if (!this.running || this.hiddenPaused) return;
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
 
+            let wait = Math.max(300, CFG.interval);
             try {
                 await this.step();
+                this.failStreak = 0;              // 这一轮没抛错 → 退避清零
             } catch (e) {
                 this.stats.errors++;
+                this.failStreak++;
                 warn('step 出错：', e);
                 Diag.lastError = {
                     time: new Date().toLocaleTimeString(),
                     msg: String(e && e.message || e),
                     stack: e && e.stack ? String(e.stack).split('\n').slice(0, 3).join('\n') : '',
                 };
-                UI.setStatus('出错：' + e.message, 'err');
-                // 连续出错就停一会儿，避免刷屏
-                await sleep(1500);
+                const kind = classifyError(e);
+                if (kind === 'config') {
+                    // 模型名 / 地址 / Key 写错这类问题，重试永远好不了：停下来让用户去改
+                    UI.setStatus('出错：' + e.message, 'err');
+                    UI.setStatus('配置有问题，已自动停止：' + e.message, 'err');
+                    this.stop();
+                    return;
+                }
+                const ms = this.backoffDelay(e);
+                wait = Math.max(wait, ms);
+                UI.setStatus('出错（' + (kind === 'ratelimit' ? '被限流' : kind === 'quota' ? '额度不足' : '请求失败')
+                    + '），' + Math.round(ms / 1000) + 's 后重试：' + e.message, 'err');
             }
 
-            if (this.running) {
-                this.timer = setTimeout(() => this.tick(), Math.max(300, CFG.interval));
+            if (this.running && !this.hiddenPaused) {
+                this.timer = setTimeout(() => this.tick(), wait);
             }
         },
 
@@ -2900,8 +3091,16 @@
             const noChange = this.lastThumb
                 && thumbDiff(thumb, this.lastThumb) < NO_CHANGE_DIFF;
 
-            // 上一轮识别到文字、且画面几乎没变 → 跳过；预览也放在这之后，画面一模一样时重画纯属白费。
-            if (noChange && this.lastOriginal) {
+            // 判据用 lastSentThumb（上一次**花钱识别过**的那一帧），而不是 lastOriginal。
+            //
+            // 为什么不能用 lastOriginal：识别结果为空时 present() 会把它清成 ''，于是
+            // 「画面静止 + 边缘密度够高 + 识别不出文字」这个组合会让本判断永远不成立 ——
+            // 每隔一个间隔就重新识别一张逐像素相同的图，每次钱照扣、结果都是空。
+            // 静止空镜 / 风景 / 标题卡都会命中这条路。
+            //
+            // lastSentThumb 在 recognize() 真正发起请求前更新，与「识别结果是否为空」解耦：
+            // 同一张图只买一次，无论买回来的答案是什么。
+            if (noChange && this.lastSentThumb) {
                 this.stats.skipped++;
                 UI.setStatus('画面未变化，跳过', 'idle');
                 return true;
@@ -2920,6 +3119,10 @@
                         Overlay.clear();
                         this.lastOriginal = '';
                     }
+                    // 这里也更新 lastSentThumb：这一帧（含它的边缘特征）已经判过，
+                    // 就算它后来变得"像有文字"，也得等画面真的变化才会重判。
+                    // 注意存的是**已经算出来的 thumb**，不额外截图。
+                    this.lastSentThumb = thumb;
                     UI.setStatus('未检测到文字，跳过（边缘密度 ' + ed.toFixed(3) + '）', 'idle');
                     return true;
                 }
@@ -2929,6 +3132,9 @@
 
         /** 调识别 / 翻译引擎；返回 null 表示结果已作废 */
         async recognize(canvas, myGen) {
+            // 记下「这一帧已经买过了」——放在 await 之前，成功失败都算买过。
+            // 空结果同样要记：否则下一轮又会对同一张图再买一次（这正是 P0-1 的漏钱点）。
+            this.lastSentThumb = this.lastThumb;
             this.busy = true;
             UI.setStatus('识别中…', 'busy');
             const t0 = performance.now();
@@ -2936,6 +3142,11 @@
             try {
                 this.stats.apiCalls++;
                 res = await recognizeAndTranslate(canvas, { onDelta: this.partialSink(myGen) });
+            } catch (e) {
+                // 失败不保留「买过了」的标记：让下一轮能重试同一帧。
+                // 否则一次网络抖动会让这张图在整个静止期间都不再被识别。
+                this.lastSentThumb = null;
+                throw e;
             } finally {
                 this.busy = false;
             }
@@ -3334,12 +3545,35 @@
         el.innerHTML = html;
     }
 
-    /** '#rrggbb' → [r,g,b]，解析失败回退白色 */
+    /**
+     * 十六进制颜色 → [r,g,b]；解析失败回退白色。
+     *
+     * 支持 CSS 的全部十六进制写法：`#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`。
+     * 为什么必须覆盖这些：sanitizeCfg 的校验正则是 `^#[0-9a-fA-F]{3,8}$`
+     * （docs/ARCHITECTURE.md 也把白名单写成「#RGB~#RRGGBBAA」），也就是说
+     * **短式和带 alpha 的值能通过校验**。而这里原来只认恰好 6 位，其余一律
+     * 静默回退成白色 —— 用户从「导入配置」带进 `#f00` 或 `#ff000080` 时会
+     * 设了个颜色却显示成白色，且没有任何提示。
+     * 现在按 CSS 语义展开短式，4/8 位取前 6 位（alpha 由 bgOpacity 单独控制，
+     * 不在这里混进来，避免动到既有的不透明度行为）。
+     */
     function hexToRgb(hex) {
-        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
-        if (!m) return [255, 255, 255];
-        const n = parseInt(m[1], 16);
-        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+        const s = String(hex == null ? '' : hex).trim().replace(/^#/, '');
+        // 只接受 3/4/6/8 位十六进制（4 位 = 带 alpha 的短式）
+        if (!/^[0-9a-f]+$/i.test(s)) return [255, 255, 255];
+        let r, g, b;
+        if (s.length === 3 || s.length === 4) {
+            r = parseInt(s[0] + s[0], 16);
+            g = parseInt(s[1] + s[1], 16);
+            b = parseInt(s[2] + s[2], 16);
+        } else if (s.length === 6 || s.length === 8) {
+            r = parseInt(s.slice(0, 2), 16);
+            g = parseInt(s.slice(2, 4), 16);
+            b = parseInt(s.slice(4, 6), 16);
+        } else {
+            return [255, 255, 255];
+        }
+        return [r, g, b];
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -3419,7 +3653,8 @@
                 box.style.height = '0px';
             };
             // 拖拽时实时截出"当前框住的这块"喂给预览：否则预览里始终是**上一次**的区域，
-            // 框选过程中判断不出这次框得对不对。用 rAF 合并 —— mousemove 一秒几十次，每次截图 ~0.7ms。
+            // 框选过程中判断不出这次框得对不对。用 rAF 合并 —— mousemove 一秒几十次，
+            // 而一次 Capturer.grab 实测约 0.43 ms（`npm run bench`），不合并就是白烧。
             let previewRaf = 0;
             const previewDrag = (x, y, w, h) => {
                 if (previewRaf) return;
@@ -3471,9 +3706,9 @@
                 rememberRegion(CFG.region);   // 按网站记住，换站不会串
                 UI.syncRegion();
                 UI.setStatus('字幕区域已设定：' + w + '×' + h + '（已记住本站）', 'ok');
-                Pipeline.invalidate();
-                Pipeline.lastThumb = null;
-                Pipeline.lastOriginal = '';
+                // 换了区域 = 换了画面含义：上一帧的记录全部作废（含 lastSentThumb，
+                // 否则新区域的第一帧会被误判成"已经买过"而跳过）
+                Pipeline.resetFrameState();
 
                 // 框完立刻截一帧（不用等点「开始」才发现框歪了）：密钥配好了就顺带识别一次，把整条链路
                 // 验证掉；没配则只截不认，免得刚框完就弹个 401 吓人。（视频暂停时也能截，适合"暂停着慢慢框"。）
@@ -3536,7 +3771,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.12.0';
+    const SCRIPT_VERSION = '1.13.0';
 
     const Diag = {
         modal: null,
@@ -3641,6 +3876,7 @@
                 p('  最大输出     : ' + CFG.maxTokens + ' tokens');
             }
             p('  参数         : 间隔 ' + CFG.interval + 'ms, 智能跳过 ' + CFG.smartSkip
+                + ', 切后台暂停 ' + (CFG.pauseWhenHidden ? '开' : '关')
                 + ', 相似度阈值 ' + CFG.textSimThreshold);
             p('');
 
@@ -3686,6 +3922,11 @@
             const s = Pipeline.stats;
             p('  截图 ' + s.shots + ' / 调API ' + s.apiCalls + ' / 跳过 ' + s.skipped + ' / 错误 ' + s.errors);
             p('  运行中 : ' + Pipeline.running);
+            // 这两项是新加入的"为什么会慢/会停"的线索：退避中或后台暂停时，
+            // 用户看到的是"什么都没发生"，没有这两行就只能猜
+            p('  连续失败 : ' + (Pipeline.failStreak || 0)
+                + (Pipeline.failStreak ? '（正在退避重试）' : ''));
+            p('  后台暂停 : ' + (Pipeline.hiddenPaused ? '是（切回该标签页自动继续）' : '否'));
             p('  状态行 : ' + (UI.els.status ? UI.els.status.textContent : '-'));
             p('');
 
@@ -4082,6 +4323,9 @@
             '  <label style="flex-direction:row;align-items:center;gap:6px">',
             '    <input id="h1sub-smartSkip" type="checkbox" style="width:auto"> 无文字时跳过调用（省 API 费用）',
             '  </label>',
+            '  <label style="flex-direction:row;align-items:center;gap:6px" title="视频在后台标签页仍会继续播放，不暂停就会一直调用付费接口">',
+            '    <input id="h1sub-pauseWhenHidden" type="checkbox" style="width:auto"> 切到后台标签页时暂停（省 API 费用）',
+            '  </label>',
             '  <label>相似度阈值 <span id="h1sub-simVal" style="color:#8b93a7"></span>',
             '    <input id="h1sub-sim" type="range" min="0" max="0.8" step="0.02">',
             '  </label>',
@@ -4254,7 +4498,7 @@
     //              isStaleDeepSeekModel、shouldDisableThinking、umiBase、umiProbe、
     //              callUmiOCR、callYoudaoImage、callChat、recognizeAndTranslate、
     //              baiPair、baiProbe、baiPrepare、baiReset、baiBrowser、baiVersionNote、
-    //              langCode、wtSelftest、
+    //              langCode、wtSelftest、wtReset、uiHost、
     //              Capturer、Pipeline、Overlay、Diag、Fullscreen、RegionSelector、
     //              openModal、setHTML、escapeHtml、STATUS_COLORS、panelHTML、panelCSS、
     //              banCurrentHost、cache
@@ -4301,7 +4545,7 @@
                 'webtranslate', 'wtEngine', 'wtMinInterval', 'wt-test', 'wt-status',
                 'umionly', 'umiBase', 'umiLang', 'umi-test', 'umi-status',
                 'captureMode', 'sharescreen', 'stopscreen', 'capture-hint',
-                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'sim', 'simVal',
+                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
                 'fontSize', 'fontVal', 'bgOpacity', 'opacityVal', 'offsetY', 'offsetVal',
                 'textColor', 'outline', 'showOriginal', 'overlayTop',
                 'extraPrompt', 'thinkingMode', 'thinking-hint', 'maxTokens',
@@ -4650,6 +4894,8 @@
                     'textColor', 'outline', 'offsetY'].includes(key)) {
                     Overlay.clear();
                     Overlay.last = null;
+                    // 外观变了要重画，但画面本身没变 —— 只作废缩略图记录，
+                    // 保留 lastSentThumb 免得为同一帧再买一次识别
                     Pipeline.lastThumb = null;
                     Pipeline.lastOriginal = '';
                 }
@@ -4659,6 +4905,9 @@
                     cache.clear();
                     Pipeline.lastOriginal = '';
                     Pipeline.lastTranslation = '';
+                    // 换了引擎 / 语言，同一帧也要重新识别一次（结果会不同），
+                    // 所以这里必须连 lastSentThumb 一起清 —— 否则静止画面会一直跳过。
+                    Pipeline.lastSentThumb = null;
                 }
             };
 
@@ -4710,6 +4959,7 @@
             bindInput('thinkingMode', e.thinkingMode);
             bindInput('maxTokens', e.maxTokens, Number);
             bindInput('smartSkip', e.smartSkip, () => e.smartSkip.checked);
+            bindInput('pauseWhenHidden', e.pauseWhenHidden, () => e.pauseWhenHidden.checked);
             bindInput('showOriginal', e.showOriginal, () => e.showOriginal.checked);
             bindInput('overlayTop', e.overlayTop, () => e.overlayTop.checked);
             bindInput('outline', e.outline, () => e.outline.checked);
@@ -5322,6 +5572,7 @@
             e.tgtLang.value = CFG.tgtLang;
             e.interval.value = CFG.interval;
             e.smartSkip.checked = !!CFG.smartSkip;
+            e.pauseWhenHidden.checked = !!CFG.pauseWhenHidden;
             e.sim.value = CFG.textSimThreshold;
             e.simVal.textContent = Number(CFG.textSimThreshold).toFixed(2);
             e.captureMode.value = CFG.captureMode || 'auto';
@@ -5516,10 +5767,13 @@
     //  并挂上"视频后加载"与"SPA 换页"两个监听。
     //
     //  对外提供：isConfigured、boot、mountUI
-    //  依赖：CFG、saveCfgKeys、log、warn、isHostDisabled、syncRegionForHost、
-    //              Fullscreen、isTopFrame、findVideo、watchForVideo、UI、
-    //              RegionSelector、Pipeline、Overlay、SCRIPT_VERSION、Capturer、Diag、
-    //              banCurrentHost、baiSupport、invalidateFindVideoCache
+    //  依赖：* —— 本模块末尾的 window.__H1SUB__ 调试钩子从每个模块重导出上百个
+    //              名字（它是刻意的测试 / 诊断接口，见 docs/API.md「内部 JS API」），
+    //              逐个列举既无意义也没人维护，所以声明为通配；build.mjs 认得它。
+    //              除此之外真正用到的是：CFG、saveCfgKeys、log、warn、isHostDisabled、
+    //              syncRegionForHost、Fullscreen、isTopFrame、findVideo、watchForVideo、
+    //              UI、RegionSelector、Pipeline、Overlay、SCRIPT_VERSION、Capturer、
+    //              Diag、banCurrentHost、baiSupport、invalidateFindVideoCache
     // ═══════════════════════════════════════════════════════════════
     function isConfigured() {
         // 浏览器内置 AI 不要 Key，但得有这个能力；没有就别装作配好了
@@ -5595,7 +5849,7 @@
                 baiBrowser, baiVersionNote,
                 baiSupport, baiApi, baiPair, langCode, baiFrameNote, baiAvailability,
                 baiAvailText, baiProbe, baiPrepare, baiReset, baiJoinChunk,
-                baiTranslate, baiOcrByBuiltin, recognizeByBrowserAI,
+                baiTranslate, baiOcrByBuiltin, baiOcrSession, baiCanvasBlob, recognizeByBrowserAI,
                 baiBrokenPairs, baiPairKey, baiMayPivot, baiIsPairFailure,
                 baiCollapseRepeat, baiPolish,
                 WT_ENGINES, WT_DEFAULT_ORDER, WT_ENGINE_CHOICES, wtStats, wtOrder,
@@ -5611,6 +5865,7 @@
                 TT_POLICY, setHTML, escapeHtml, hexToRgb, openModal,
                 cacheGet, cachePut, panelHTML, panelCSS,
                 textSimilarity, thumbnail, thumbDiff, edgeDensity, parseModelJson,
+                classifyError,
                 findVideo, getContentBox, resolveRegion, anchorRegion,
                 sanitizeCfg, ENGINES, Fullscreen, uiHost, isHostDisabled, isTopFrame, watchForVideo,
                 isConfigured, invalidateFindVideoCache,
@@ -5640,6 +5895,15 @@
             if (UI.pillMode) UI.leavePillMode();
         });
 
+        // 切到后台就暂停翻译：视频在后台标签页会继续播放，`video.paused` 是 false，
+        // 主循环那道闸门拦不住 —— 会一直截图并调用付费接口，而没人看得到结果。
+        // 这里只挂一个 document 级监听，不做任何轮询。
+        document.addEventListener('visibilitychange', () => {
+            if (!CFG.pauseWhenHidden) return;
+            if (document.hidden) Pipeline.pauseForHidden();
+            else Pipeline.resumeFromHidden();
+        });
+
         // SPA 路由切换后重新看本站的区域要不要换。只比较 pathname + search：站点在播放过程中会改
         // hash（章节/时间戳跳转）和查询串（埋点、无限滚动），拿 href 比较会让字幕莫名其妙自己停掉。
         let lastHref = location.pathname + location.search;
@@ -5650,8 +5914,7 @@
             lastHref = now;
             log('页面地址变化，重新检查');
             Pipeline.stop();
-            Pipeline.lastThumb = null;
-            Pipeline.lastOriginal = '';
+            Pipeline.resetFrameState();
             Overlay.clear();
             invalidateFindVideoCache();   // ⚡ 优化：跳页了，findVideo 的缓存立刻作废
             UI.syncRegion();

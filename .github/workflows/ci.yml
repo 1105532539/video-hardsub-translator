@@ -1,0 +1,50 @@
+name: CI
+
+# 两条硬性规则靠这里变成机器强制（CONTRIBUTING.md 要求 444 项全过、
+# 且产物必须与 src/ 一致，此前完全依赖人工自觉）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── ① 构建一致性：只依赖 Node，零 flake，任何改动都会跑 ──────────────
+  #  先跑 --check 再跑任何构建 —— 顺序很重要：npm test 的 pretest 会重新生成
+  #  产物，所以「改了 src/ 却忘了构建」一旦让它先跑就再也查不出来了。
+  build:
+    name: 产物与 src 一致
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 产物是否与 src/ 一致
+        run: node _build/build.mjs --check
+
+      - name: 产物语法检查
+        run: node --check video-hardsub-translator.user.js
+
+  # ── ② 8 个测试套件 ────────────────────────────────────────────────
+  #  必须串行：各套件用固定端口（见 docs/TESTING.md「CI 集成」）。
+  #  用 windows-latest 与作者本机环境对齐 —— 此前各套件只在 Windows 上验证过。
+  #  Chrome 已预装在 cdp.mjs 的默认路径，无需额外安装。
+  test:
+    name: 8 个测试套件（串行）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 确认 Chrome 可用
+        shell: pwsh
+        run: |
+          $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+          if (-not (Test-Path $chrome)) { throw "找不到 Chrome：$chrome" }
+          & $chrome --version
+
+      - name: 运行全部套件
+        run: npm test

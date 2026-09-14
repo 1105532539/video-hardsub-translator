@@ -8,7 +8,7 @@
     //  离屏画布与 DP 滚动行缓冲都复用，不每轮新建。
     //
     //  对外提供：thumbnail、thumbDiff、edgeDensity、textSimilarity
-    //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD、EDGE_MIN
+    //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD
     // ═══════════════════════════════════════════════════════════════
     /**
      * 复用的离屏画布。这两个函数每轮（约 1.2 秒）各调一次，原来每次都在新建

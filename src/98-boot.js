@@ -7,10 +7,13 @@
     //  并挂上"视频后加载"与"SPA 换页"两个监听。
     //
     //  对外提供：isConfigured、boot、mountUI
-    //  依赖：CFG、saveCfgKeys、log、warn、isHostDisabled、syncRegionForHost、
-    //              Fullscreen、isTopFrame、findVideo、watchForVideo、UI、
-    //              RegionSelector、Pipeline、Overlay、SCRIPT_VERSION、Capturer、Diag、
-    //              banCurrentHost、baiSupport、invalidateFindVideoCache
+    //  依赖：* —— 本模块末尾的 window.__H1SUB__ 调试钩子从每个模块重导出上百个
+    //              名字（它是刻意的测试 / 诊断接口，见 docs/API.md「内部 JS API」），
+    //              逐个列举既无意义也没人维护，所以声明为通配；build.mjs 认得它。
+    //              除此之外真正用到的是：CFG、saveCfgKeys、log、warn、isHostDisabled、
+    //              syncRegionForHost、Fullscreen、isTopFrame、findVideo、watchForVideo、
+    //              UI、RegionSelector、Pipeline、Overlay、SCRIPT_VERSION、Capturer、
+    //              Diag、banCurrentHost、baiSupport、invalidateFindVideoCache
     // ═══════════════════════════════════════════════════════════════
     function isConfigured() {
         // 浏览器内置 AI 不要 Key，但得有这个能力；没有就别装作配好了
@@ -86,7 +89,7 @@
                 baiBrowser, baiVersionNote,
                 baiSupport, baiApi, baiPair, langCode, baiFrameNote, baiAvailability,
                 baiAvailText, baiProbe, baiPrepare, baiReset, baiJoinChunk,
-                baiTranslate, baiOcrByBuiltin, recognizeByBrowserAI,
+                baiTranslate, baiOcrByBuiltin, baiOcrSession, baiCanvasBlob, recognizeByBrowserAI,
                 baiBrokenPairs, baiPairKey, baiMayPivot, baiIsPairFailure,
                 baiCollapseRepeat, baiPolish,
                 WT_ENGINES, WT_DEFAULT_ORDER, WT_ENGINE_CHOICES, wtStats, wtOrder,
@@ -102,6 +105,7 @@
                 TT_POLICY, setHTML, escapeHtml, hexToRgb, openModal,
                 cacheGet, cachePut, panelHTML, panelCSS,
                 textSimilarity, thumbnail, thumbDiff, edgeDensity, parseModelJson,
+                classifyError,
                 findVideo, getContentBox, resolveRegion, anchorRegion,
                 sanitizeCfg, ENGINES, Fullscreen, uiHost, isHostDisabled, isTopFrame, watchForVideo,
                 isConfigured, invalidateFindVideoCache,
@@ -131,6 +135,15 @@
             if (UI.pillMode) UI.leavePillMode();
         });
 
+        // 切到后台就暂停翻译：视频在后台标签页会继续播放，`video.paused` 是 false，
+        // 主循环那道闸门拦不住 —— 会一直截图并调用付费接口，而没人看得到结果。
+        // 这里只挂一个 document 级监听，不做任何轮询。
+        document.addEventListener('visibilitychange', () => {
+            if (!CFG.pauseWhenHidden) return;
+            if (document.hidden) Pipeline.pauseForHidden();
+            else Pipeline.resumeFromHidden();
+        });
+
         // SPA 路由切换后重新看本站的区域要不要换。只比较 pathname + search：站点在播放过程中会改
         // hash（章节/时间戳跳转）和查询串（埋点、无限滚动），拿 href 比较会让字幕莫名其妙自己停掉。
         let lastHref = location.pathname + location.search;
@@ -141,8 +154,7 @@
             lastHref = now;
             log('页面地址变化，重新检查');
             Pipeline.stop();
-            Pipeline.lastThumb = null;
-            Pipeline.lastOriginal = '';
+            Pipeline.resetFrameState();
             Overlay.clear();
             invalidateFindVideoCache();   // ⚡ 优化：跳页了，findVideo 的缓存立刻作废
             UI.syncRegion();

@@ -75,7 +75,8 @@
                 box.style.height = '0px';
             };
             // 拖拽时实时截出"当前框住的这块"喂给预览：否则预览里始终是**上一次**的区域，
-            // 框选过程中判断不出这次框得对不对。用 rAF 合并 —— mousemove 一秒几十次，每次截图 ~0.7ms。
+            // 框选过程中判断不出这次框得对不对。用 rAF 合并 —— mousemove 一秒几十次，
+            // 而一次 Capturer.grab 实测约 0.43 ms（`npm run bench`），不合并就是白烧。
             let previewRaf = 0;
             const previewDrag = (x, y, w, h) => {
                 if (previewRaf) return;
@@ -127,9 +128,9 @@
                 rememberRegion(CFG.region);   // 按网站记住，换站不会串
                 UI.syncRegion();
                 UI.setStatus('字幕区域已设定：' + w + '×' + h + '（已记住本站）', 'ok');
-                Pipeline.invalidate();
-                Pipeline.lastThumb = null;
-                Pipeline.lastOriginal = '';
+                // 换了区域 = 换了画面含义：上一帧的记录全部作废（含 lastSentThumb，
+                // 否则新区域的第一帧会被误判成"已经买过"而跳过）
+                Pipeline.resetFrameState();
 
                 // 框完立刻截一帧（不用等点「开始」才发现框歪了）：密钥配好了就顺带识别一次，把整条链路
                 // 验证掉；没配则只截不认，免得刚框完就弹个 401 吓人。（视频暂停时也能截，适合"暂停着慢慢框"。）

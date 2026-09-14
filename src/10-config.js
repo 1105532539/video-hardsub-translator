@@ -79,6 +79,7 @@
         regionsByHost: {},                      // 按网站分别记住框选区域 { hostname: region }
         captureMode: 'auto',                    // auto | element | display
         smartSkip: true,                        // 无文字时跳过 API 调用（省钱）
+        pauseWhenHidden: true,                  // 切到后台标签页时暂停（视频在后台仍会播放，不暂停就是白烧钱）
         textSimThreshold: 0.28,                 // 文本相似度阈值(0~1)，越高越不容易重复翻译
 
         // ---- 全站运行的开关 ----
@@ -119,7 +120,7 @@
         return sanitizeCfg(cfg);
     }
 
-    /** 当前支持的四种引擎 */
+    /** 当前支持的五种引擎（与 00-header.js 的说明、面板 <select> 的选项一一对应） */
     const ENGINES = ['openai-vision', 'umi-ocr', 'youdao-img', 'browser-ai', 'web-translate'];
 
     // web-translate 的接口选择，和面板上的 <option> 一一对应
@@ -157,6 +158,11 @@
         if (BAI_TRANS_CHOICES.indexOf(cfg.baiTrans) < 0) cfg.baiTrans = DEFAULTS.baiTrans;
         cfg.baiStream = !!cfg.baiStream;
         cfg.baiPivot = cfg.baiPivot === undefined ? DEFAULTS.baiPivot : !!cfg.baiPivot;
+        // 布尔开关统一强转：导入的 JSON 里可能是 "false" / 0 / null，
+        // 用 !! 会把字符串 "false" 变成 true，所以显式按默认值兜底
+        cfg.smartSkip = cfg.smartSkip === undefined ? DEFAULTS.smartSkip : !!cfg.smartSkip;
+        cfg.pauseWhenHidden = cfg.pauseWhenHidden === undefined
+            ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
 
         for (const k in NUM_RANGES) {
@@ -170,6 +176,20 @@
         if (typeof cfg.textColor !== 'string' || !/^#[0-9a-fA-F]{3,8}$/.test(cfg.textColor)) {
             cfg.textColor = DEFAULTS.textColor;
         }
+
+        // ── 字符串型字段：URL 形状与长度兜底 ──
+        //  这几个值都会在运行时被直接拿去拼请求，非法值会在热路径上抛错
+        //  （而且每次重试都抛），不如加载时就兜回默认。
+        cfg.apiBase = sanitizeUrl(cfg.apiBase, DEFAULTS.apiBase, { allowEmpty: true });
+        cfg.umiBase = sanitizeUrl(cfg.umiBase, DEFAULTS.umiBase);
+        cfg.model = typeof cfg.model === 'string' && cfg.model.trim()
+            ? cfg.model.trim().slice(0, 200)
+            : DEFAULTS.model;
+        // 额外提示词会被拼进 system prompt：太长会挤掉输出预算，所以限长
+        cfg.extraPrompt = typeof cfg.extraPrompt === 'string'
+            ? cfg.extraPrompt.slice(0, 2000) : DEFAULTS.extraPrompt;
+        cfg.apiKey = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : DEFAULTS.apiKey;
+
         if (cfg.region && typeof cfg.region === 'object') {
             const g = cfg.region;
             // ⚡ 优化：原来是「四个坐标塞进临时数组、再用数组方法逐个判断」的写法，
@@ -183,9 +203,40 @@
             cfg.region = null;
         }
         if (!Array.isArray(cfg.apiProfiles)) cfg.apiProfiles = [];
+        // 逐项过滤：导入的 JSON 里可能塞进 null / 字符串 / 缺字段的对象，
+        // 面板渲染配置列表时会在这些项上炸掉（原来只判了"是不是数组"）
+        cfg.apiProfiles = cfg.apiProfiles.filter(p => p && typeof p === 'object'
+            && typeof p.name === 'string' && p.name.trim()).map(p => ({
+                name: String(p.name).trim().slice(0, 60),
+                apiBase: sanitizeUrl(p.apiBase, DEFAULTS.apiBase, { allowEmpty: true }),
+                apiKey: typeof p.apiKey === 'string' ? p.apiKey.trim() : '',
+                model: typeof p.model === 'string' ? p.model.trim().slice(0, 200) : '',
+                thinkingMode: p.thinkingMode,
+                maxTokens: p.maxTokens,
+            }));
         if (!Array.isArray(cfg.disabledHosts)) cfg.disabledHosts = [];
-        if (!cfg.regionsByHost || typeof cfg.regionsByHost !== 'object') cfg.regionsByHost = {};
+        // 只保留非空字符串，避免导入的脏数据让 isHostDisabled 永远匹配不上
+        cfg.disabledHosts = cfg.disabledHosts.filter(h => typeof h === 'string' && h.trim())
+            .map(h => h.trim());
+        if (!cfg.regionsByHost || typeof cfg.regionsByHost !== 'object'
+            || Array.isArray(cfg.regionsByHost)) cfg.regionsByHost = {};
         return cfg;
+    }
+
+    /**
+     * 规整一个「服务地址」配置项：去空白、去尾斜杠，并校验形状。
+     * 非 http(s) 的值一律兜回默认 —— 否则运行时会拼出 `undefined/chat/completions`
+     * 这种地址，每轮重试都抛一次，用户只看到状态栏一直红。
+     * @param {string} v
+     * @param {string} fallback 非法时用的默认值
+     * @param {{allowEmpty?:boolean}} [opts] allowEmpty：空串是合法的（表示"用默认"）
+     */
+    function sanitizeUrl(v, fallback, opts) {
+        const allowEmpty = !!(opts && opts.allowEmpty);
+        const s = String(v == null ? '' : v).trim();
+        if (!s) return allowEmpty ? '' : fallback;
+        if (!/^https?:\/\/[^\s/]+/i.test(s)) return fallback;
+        return s.replace(/\/+$/, '').slice(0, 500);
     }
 
     function saveCfg(cfg) {

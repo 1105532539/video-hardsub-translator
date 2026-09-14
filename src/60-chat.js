@@ -115,7 +115,11 @@
             else if (r.status === 404) msg += '　→ API 地址或模型名不对';
             else if (r.status === 429) msg += '　→ 请求太频繁或额度用尽，试试调大截图间隔';
             else if (/model/i.test(msg) && r.status === 400) msg += '　→ 模型名可能写错了';
-            throw new Error(msg);
+            // 带上 HTTP 状态码：主循环据此区分「该退避重试」还是「该让用户改配置」，
+            // 比事后拿报错文案做正则匹配可靠（文案随时会改）。
+            const err = new Error(msg);
+            err.httpStatus = r.status;
+            throw err;
         }
         let j;
         try { j = JSON.parse(r.responseText); }

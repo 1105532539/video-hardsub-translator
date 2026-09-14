@@ -4,11 +4,11 @@
 > 不依赖任何后端服务，一个用户脚本文件即装即用；五种引擎里有四种无需浏览器下载模型（唯一会下载模型的「浏览器内置 AI」引擎，下载的是 Chrome 自带的端侧模型）。
 
 [![Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-595525-orange.svg)](https://greasyfork.org/zh-CN/scripts/595525)
-![version](https://img.shields.io/badge/version-1.12.0-blue.svg)
+![version](https://img.shields.io/badge/version-1.13.0-blue.svg)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
 ![runtime](https://img.shields.io/badge/runtime-Node.js%20%E2%89%A5%2022-brightgreen.svg)
-![tests](https://img.shields.io/badge/tests-444%20passed-success.svg)
+![tests](https://img.shields.io/badge/tests-523%20passed-success.svg)
 ![deps](https://img.shields.io/badge/dependencies-0-success.svg)
 
 ---
@@ -115,10 +115,12 @@
   - `display` 模式——`getDisplayMedia` 捕获当前标签页。一定能拿到像素（跨域视频也适用），首次需手动授权。
   - `auto` 模式——优先 `element`；一旦检测到画布被跨域污染，自动请求切换到 `display`。
 - **智能跳过（省钱核心）**：
-  - 32×16 灰度缩略图**变化检测**——画面没变就跳过（默认阈值 `0.004`）。
+  - 32×16 灰度缩略图**变化检测**——画面没变就跳过（默认阈值 `0.004`）。判据记的是「上一次**花钱识别过**的那一帧」，因此「画面静止但认不出文字」时同一张图只买一次。
   - 160×48 **边缘密度**判定——区域里没有文字就跳过（默认阈值 `0.035`）。
   - 文本**相似度**去重——和上一句是同一句就保持（默认阈值 `0.28`）。
   - **LRU 翻译缓存**（上限 500 条）——重复台词直接命中，不再付费重翻。
+  - **切到后台标签页自动暂停**——视频在后台会继续播放，不暂停就会一直花钱而没人看得到结果（`pauseWhenHidden`，默认开）。
+  - **出错按类型退避**——429 指数退避（封顶 60s），5xx/超时封顶 15s；Key / 地址 / 模型名写错这类配置问题**不退避而是直接停止**并提示去改（重试永远不会好）。
 
 ### 显示与交互
 
@@ -131,7 +133,7 @@
 
 ### 工程与可维护性
 
-- **444 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
+- **523 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
 - **A/B 性能基准**工具：新旧两版交替跑、取中位数，输出逐项差异。
 - **零第三方依赖**：测试框架基于 Node 内置 WebSocket 直接驱动 Chrome DevTools Protocol。
 
@@ -485,7 +487,7 @@ npm run build              # 零依赖拼接（只用 Node 内置模块）
 npm run build:check        # 只校验产物与 src/ 是否一致（提交前用）
 
 # 运行测试（需要 Node ≥ 22 与本机 Chrome）
-npm test                   # 全部 6 个套件；会自动先跑一次 npm run build
+npm test                   # 全部 9 个套件；会自动先跑一次 npm run build
 node _test/engine.mjs      # 引擎层：请求体 / 响应解析 / 错误提示
 node _test/smoke-panel.mjs # 面板冒烟：挂载 / 预设 / 导入导出 / 诊断
 ```
@@ -637,6 +639,7 @@ node _test/smoke-panel.mjs # 面板冒烟：挂载 / 预设 / 导入导出 / 诊
 | `interval` | `number` | `1200` | 300–60000 | 截图间隔（ms） |
 | `captureMode` | `string` | `auto` | — | `auto` / `element` / `display` |
 | `smartSkip` | `boolean` | `true` | — | 无文字时跳过 API 调用 |
+| `pauseWhenHidden` | `boolean` | `true` | — | 切到后台标签页时暂停（视频在后台仍会播放，不暂停就是白花钱） |
 | `textSimThreshold` | `number` | `0.28` | 0–0.8 | 相似度阈值，越高越不容易重复翻译 |
 | `region` | `object\|null` | `null` | — | 框选区域（页面坐标 `{x,y,w,h,box}`） |
 | `regionHost` | `string\|null` | `null` | — | 上述区域所属站点 |
@@ -816,17 +819,18 @@ video-hardsub-translator/
 零第三方依赖，用 Node 内置 `WebSocket` 直连 Chrome DevTools Protocol 驱动**真实浏览器**，以 `GM_*` 桩拦截网络请求，因此**不需要真实 API Key**。
 
 ```bash
+node _test/build.mjs         # 27 项  构建守卫本身：重名、依赖对账、版本号、语法门、--check 漂移（不起 Chrome）
 node _test/engine.mjs        # 50 项  引擎协议：请求体、思考模式参数、响应解析、错误提示
-node _test/browser-ai.mjs    # 94 项  浏览器内置 AI 离线引擎：语言映射、探测、全离线链路、流式、经英语中转
+node _test/browser-ai.mjs    # 96 项  浏览器内置 AI 离线引擎：语言映射、探测、全离线链路、流式、经英语中转、快照时序
 node _test/web-translate.mjs # 44 项  免费网页接口：语言码映射、降级链、token 重取、限速、缓存、测活
-node _test/opt.mjs           # 76 项  专项：模型能力判定、缓存、区域锚点、UI 交互
+node _test/opt.mjs           # 126 项 专项：模型能力判定、缓存、区域锚点、UI 交互、省钱跳过、退避、后台暂停
 node _test/allsite.mjs       # 37 项  全站策略：无视频只留胶囊、iframe 不污染、本站禁用
 node _test/smoke-panel.mjs   # 79 项  面板冒烟：挂载、预设、档案、导入导出、诊断
 node _test/layout.mjs        # 33 项  布局几何：面板在视口内、控件尺寸、按钮可见性
 node _test/fullscreen.mjs    # 31 项  全屏：UI 搬进全屏容器、原生字幕轨回退
 ```
 
-当前状态：**444 / 444 全部通过**。
+当前状态：**523 / 523 全部通过**。
 
 ### 性能基准
 
@@ -1028,7 +1032,7 @@ node _test/layout.mjs
 node _test/fullscreen.mjs
 ```
 
-**444 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
+**523 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
 
 ---
 
