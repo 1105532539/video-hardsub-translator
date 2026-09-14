@@ -1,11 +1,16 @@
     // ═══════════════════════════════════════════════════════════════
-    //  48-browser-ai.js — 浏览器内置 AI：完全离线的识别 / 翻译
+    //  48-browser-ai.js — 浏览器内置 AI：免 Key 的识别 / 翻译
     //
-    //  路线：直接调用浏览器**自带**的端侧模型，不联网、不要 API Key、
-    //  原文不出设备、也不产生任何 API 费用。
+    //  路线：直接调用浏览器**自带**的模型，不要 API Key、不产生任何 API 费用。
     //
     //    Translator（Translation API）  —— 端侧翻译模型，快，专为翻译训练
     //    LanguageModel（Prompt API）    —— Gemini Nano，可看图（多模态）
+    //
+    //  ⚠️ 隐私边界（别把两家的实现混为一谈）：
+    //    · Chrome：端侧模型，语言包下载到本机，**不联网、原文不出设备**；
+    //    · Edge：同名 API 但是**另一套实现**，是否完全本地未经证实
+    //      （实测断网后 create() 直接挂死，说明它会去联网）——
+    //      **不要把它当作隐私保证**。详见 README 的 browser-ai 一节。
     //
     //  于是有两条组合（面板里「识别方式」自己选）：
     //    umi     ：Umi-OCR 认出原文 → Translator 翻译      （识别率最高，推荐）
@@ -16,7 +21,7 @@
     //
     //  ⚠️ 四条实测得出的硬约束（Chrome 153 / Edge 145，见 docs/ARCHITECTURE.md）：
     //   1. 会话创建会触发模型下载，而「下载」必须发生在**用户手势**里。
-    //      所以下载一律由面板上的「② 准备离线模型」按钮发起（baiPrepare），
+    //      所以下载一律由面板上的「准备离线模型」按钮发起（baiPrepare），
     //      主循环里只用已经建好的会话，绝不自己 create() 一个待下载的模型。
     //   2. 端侧模型**声明支持**的语言里没有中文（zh / ko / ru … 都会让
     //      availability() 直接返回 "unavailable"）。所以：
@@ -122,7 +127,7 @@
     //  语言名 → 语言码的映射表在 32-util.js（langCode），49-web-translate.js 用的是同一张表。
     const BAI_AVAIL_TEXT = {
         available: '✅ 已就绪（不用再下载）',
-        downloadable: '⬇️ 需要下载（点「② 准备离线模型」）',
+        downloadable: '⬇️ 需要下载（点「准备离线模型」）',
         downloading: '⏳ 正在下载…',
         unavailable: '❌ 不支持（语言对或能力不够）',
         unsupported: '❌ 这台浏览器没有这个 API',
@@ -205,15 +210,15 @@
         // 会话被 destroy() 会把在飞的 translate() 打断。正常路径不该发生（见 baiCache 的说明），
         if (baiIsAbort(e)) {
             return '翻译被中断了（端侧会话被重建：多半是刚改过语言/引擎设置，或页面正在切走）'
-                + '—— 重新点「② 准备离线模型」，或重新点「开始」即可';
+                + '—— 重新点「准备离线模型」，或重新点「开始」即可';
         }
         if (/generic failures occurred/i.test(m)) {
             return '这个浏览器的内置翻译不支持「' + baiPairText(pair) + '」这个语言对'
                 + '（Edge 上「日语 → 中文」必报 Generic failures）。'
-                + '可以：① 勾选「语言对不可用时经英语中转」；② 改用 Chrome；③ 换其它翻译引擎';
+                + '三条出路：勾选「语言对不可用时经英语中转」、改用 Chrome、或换其它翻译引擎';
         }
         if (/user gesture/i.test(m)) {
-            return '离线模型还没下载好 —— 请点面板上的「② 准备离线模型」'
+            return '离线模型还没下载好 —— 请点面板上的「准备离线模型」'
                 + '（浏览器只在用户点击时允许下载模型）';
         }
         if (/permissions policy|disallowed by permissions|not allowed/i.test(m)) {

@@ -23,6 +23,10 @@ video-hardsub-translator1.user.js
 /_ytdiag.mjs
 # 量「字幕截图在各级 JPEG 质量下的体积」用（验证「0.9 是否过高」那条提议）
 /_jpeg_probe.mjs
+# 把面板真实渲染出来、导出「使用说明」全文，用于人工核对其文案
+/_ui_check.mjs
+# 从 docs/greasyfork-listing.md 抽出的「发布正文」，供手工粘贴到 Greasy Fork
+/_greasyfork-paste.md
 
 # ── 参考用的第三方项目克隆 ──────────────────────────────────
 # LunaTranslator（HIllya51/LunaTranslator）是本地拉下来做翻译路线调研的参考源码，
@@ -58,6 +62,3 @@ desktop.ini
 *.log
 node_modules/
 npm-debug.log*
-
-# 从 docs/greasyfork-listing.md 抽出的「发布正文」，供手工粘贴到 Greasy Fork
-/_greasyfork-paste.md

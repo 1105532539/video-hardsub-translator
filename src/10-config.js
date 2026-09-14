@@ -95,6 +95,9 @@
         offsetY: 0,                             // 垂直微调（px，正数往下）
         panelWidth: 320,                        // 面板宽度
         panelPos: null,                         // 面板位置 {left,top}，null=默认右下角
+        // 打开新页面时是否直接展开面板。默认 false = 只留右下角小胶囊，
+        // 免得每开一个视频页都被大面板挡住；用户点开一次后记住选择。
+        panelOpen: false,
 
         // ---- 首次运行引导 ----
         onboarded: false,
@@ -163,6 +166,7 @@
         cfg.smartSkip = cfg.smartSkip === undefined ? DEFAULTS.smartSkip : !!cfg.smartSkip;
         cfg.pauseWhenHidden = cfg.pauseWhenHidden === undefined
             ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
+        cfg.panelOpen = cfg.panelOpen === undefined ? DEFAULTS.panelOpen : !!cfg.panelOpen;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
 
         for (const k in NUM_RANGES) {

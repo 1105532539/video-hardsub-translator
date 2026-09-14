@@ -53,12 +53,17 @@
 
 | 页面情况 | 行为 |
 | --- | --- |
-| 有 ≥200×120 的视频 | 直接展开完整面板 |
-| 暂时没有视频 | 只在右下角留一个**小胶囊**，点击才展开 |
-| 视频后来才出现（SPA / 懒加载） | `watchForVideo()` 检测到后自动展开 |
+| 有 ≥200×120 的视频 | 默认只留右下角**小胶囊**；点开后记住选择（`CFG.panelOpen`） |
+| 暂时没有视频 | 同样只留小胶囊（没视频时面板没有意义） |
+| 视频后来才出现（SPA / 懒加载） | `watchForVideo()` 检测到后**不自动展开**，只更新状态栏 |
 | 处于 iframe 且其中没有视频 | **完全不挂载**（广告/统计框架不受影响） |
 | iframe 中有视频 | 面板挂在该 iframe 内，不会出现两层 |
 | 站点在 `disabledHosts` 中 | 彻底不介入 |
+
+> **面板默认收起**（`CFG.panelOpen` 默认 `false`）：一打开网页就弹出大面板会挡住画面，
+> 所以默认只留小胶囊。用户点开一次即写盘记住，下次打开新页面直接展开；点 × 收起同理。
+> 判定在 `mountUI()` 末尾（`if (!findVideo() || !CFG.panelOpen) UI.enterPillMode()`），
+> **开机只读取该偏好、不写盘** —— 只有用户主动点开关才会 `UI.rememberPanelOpen()`。
 
 判定入口是 `boot()` → `isConfigured()` / `isHostDisabled()` / `isTopFrame()` / `findVideo()`。
 
@@ -471,7 +476,7 @@ JPEG 质量按引擎分别调过：`openai-vision` 用 0.85（视觉模型对压
 
 | 约束 | 实测表现 | 处理 |
 | --- | --- | --- |
-| 下载必须在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 只由面板「② 准备离线模型」按钮触发下载；主循环只用已建好的会话 |
+| 下载必须在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 只由面板「准备离线模型」按钮触发下载；主循环只用已建好的会话 |
 | 端侧模型声明语言里没有中文 | `availability({expectedOutputs:[{type:'text',languages:['zh']}]})` → `unavailable`；`en`/`ja`/`fr`/`de`/`es` → `downloadable` | 要它输出中文时不写 `expectedOutputs`，靠系统提示词引导；多模态读图按**源语言**声明 |
 | 跨域 iframe 默认不可用 | Permissions Policy 限制（顶层窗口与同源 iframe 才有） | `baiFrameNote()` 探测并在面板/诊断里说清楚 |
 | 流式分片语义未定 | Chrome 当前给的是**累计**文本，规范讨论过改成**增量**；Edge 的 `translateStreaming` 实测**只回 1 个分片**（等价于一次性调用） | `baiJoinChunk()` 两种都认，避免升级后串字 |
@@ -630,7 +635,7 @@ fullscreenchange
 - 相似度 DP 交换长短串只影响滚动行长度，编辑距离与 `1 - dist/max(m,n)` 都是对称的；
 - 画布复用不改变任何调用方的可观察行为（全部"拿到即用"）。
 
-回归验证：**523 项端到端测试全部通过**，A/B 基准无指标回退。
+回归验证：**536 项端到端测试全部通过**，A/B 基准无指标回退。
 
 ---
 
@@ -705,7 +710,7 @@ async function recognizeAndTranslate(canvas, opts) {
 
 **4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS` 并把枚举值纳入 `sanitizeCfg()` 的兜底），然后在 `UI.syncEngineUI()` 里控制其显隐。
 
-**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 523 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
+**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 536 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
 
 ---
 

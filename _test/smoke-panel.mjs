@@ -25,6 +25,9 @@ const PRELUDE = `
     let store;
     try { store = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { store = {}; }
     if (!store || typeof store !== 'object') store = {};
+    // 本套件测的是面板功能，而面板**默认收成小胶囊**（见 CFG.panelOpen）。
+    // 预置成"用户已选择保持展开"，否则面板是 display:none，摸不到里面的控件。
+    if (store['h1sub.panelOpen'] === undefined) store['h1sub.panelOpen'] = true;
     window.__gmStore = store;
     window.__gmReqs = [];
     window.GM_getValue = function (k, d) { return (k in store) ? store[k] : d; };

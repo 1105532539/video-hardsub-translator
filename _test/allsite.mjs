@@ -34,6 +34,17 @@ function check(name, pass, detail) {
     return !!pass;
 }
 
+/** 清掉本 origin 的面板展开偏好，回到"从没用过"的默认状态。
+ *  面板偏好 panelOpen 走 GM_setValue → localStorage，会跨导航保留；
+ *  这里在**当前页面里**同步删掉它（比 CDP 的 clearDataForOrigin 可靠 ——
+ *  后者是异步生效的，紧接着 navigate 会读到还没清掉的旧值）。 */
+async function clearStore(ev) {
+    await ev(`(() => {
+        try { localStorage.removeItem('__h1sub_allsite_store__'); } catch (e) { }
+        return true;
+    })()`);
+}
+
 const srv = await startServer({ port: PORT, root: PAGES, cors: true });
 const cdp = await Cdp.launch({ port: 9370 });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -100,7 +111,10 @@ try {
     check('点胶囊可以展开完整面板', clickBack.shown === true, JSON.stringify(clickBack));
     check('展开后胶囊自己隐藏', clickBack.pillHidden === true);
 
-    S('2. 有视频的页面 → 直接显示完整面板');
+    S('2. 有视频的页面 → 默认仍收成小胶囊（不再自动展开）');
+    // 上一节点开过胶囊，那会把 panelOpen=true 记进存储；这里先清掉，
+    // 才能测到"新用户 / 没选过"时的默认行为。
+    await clearStore(ev);
     check('加载有视频的页面', await go(`${BASE}/lab.html?mode=canvas`,
         `${H1} && window.__lab && window.__lab.ready`));
     await sleep(800);
@@ -111,14 +125,42 @@ try {
             return {
                 panelShown: p ? getComputedStyle(p).display !== 'none' : false,
                 pillShown: pill ? getComputedStyle(pill).display !== 'none' : false,
+                hasVideo: !!${H1}.findVideo(),
                 host: document.querySelector('#h1sub-host').textContent,
             };
         })()`);
-    check('面板直接可见（有视频就不收起）', s2.panelShown === true, JSON.stringify(s2));
-    check('小胶囊保持隐藏', s2.pillShown === false);
+    check('页面上确实有视频（否则这条测的不是"有视频也不展开"）',
+        s2.hasVideo === true, JSON.stringify(s2));
+    check('★ 有视频时面板默认也收起，不挡住画面', s2.panelShown === false, JSON.stringify(s2));
+    check('★ 改为留一个小胶囊', s2.pillShown === true, JSON.stringify(s2));
     check('面板标题栏显示了当前网站', s2.host === '127.0.0.1', s2.host);
 
-    S('3. 视频后加载（SPA / 懒加载）→ 胶囊自动展开');
+    // 点开之后应当能正常展开，而且这个选择要记住
+    const clickOpen = await ev(`
+        (() => {
+            document.querySelector('#h1sub-pill').click();
+            const p = document.querySelector('#h1sub-panel');
+            return { shown: p.style.display !== 'none',
+                     pillHidden: getComputedStyle(document.querySelector('#h1sub-pill')).display === 'none' };
+        })()`);
+    check('点胶囊可以展开完整面板', clickOpen.shown === true, JSON.stringify(clickOpen));
+    check('展开后胶囊自己隐藏', clickOpen.pillHidden === true);
+
+    S('2b. 展开的选择会被记住（换到别的视频页也保持展开）');
+    check('再打开一个视频页', await go(`${BASE}/lab.html?mode=canvas`,
+        `${H1} && window.__lab && window.__lab.ready`));
+    await sleep(800);
+    const s2b = await ev(`
+        (() => {
+            const p = document.querySelector('#h1sub-panel');
+            return { panelShown: p ? getComputedStyle(p).display !== 'none' : false,
+                     pref: ${H1}.CFG.panelOpen };
+        })()`);
+    check('存储里记住了 panelOpen=true', s2b.pref === true, JSON.stringify(s2b));
+    check('★ 记住之后新页面直接展开（尊重用户选择）', s2b.panelShown === true, JSON.stringify(s2b));
+
+    S('3. 视频后加载（SPA / 懒加载）→ 面板保持收起，不再自动展开');
+    await clearStore(ev);          // 回到"没选过"的默认状态
     check('加载视频延迟出现的页面', await go(`${BASE}/lab.html?mode=canvas&late=2500`,
         `${H1} && window.__lab`));
     await sleep(300);
@@ -149,8 +191,9 @@ try {
             return { panelShown: p ? getComputedStyle(p).display !== 'none' : false,
                      pillShown: pill ? getComputedStyle(pill).display !== 'none' : false };
         })()`);
-    check('视频出现后面板自动展开', s3b.panelShown === true, JSON.stringify(s3b));
-    check('自动展开后胶囊收起', s3b.pillShown === false);
+    check('★ 视频出现后也不自动展开（用户要的就是这个）',
+        s3b.panelShown === false, JSON.stringify(s3b));
+    check('★ 仍然只留小胶囊，等用户点开', s3b.pillShown === true, JSON.stringify(s3b));
 
     S('4. iframe 里嵌播放器 → 面板挂在 iframe 内，宿主页不乱挂');
     check('加载含 iframe 的宿主页', await go(
@@ -166,10 +209,12 @@ try {
             try {
                 const d = fr.contentDocument;
                 const ip = d && d.querySelector('#h1sub-panel');
+                const ipill = d && d.querySelector('#h1sub-pill');
                 const iv = d && d.querySelector('video');
                 inner = {
                     hasPanel: !!ip,
                     panelShown: ip ? getComputedStyle(ip).display !== 'none' : false,
+                    pillShown: ipill ? getComputedStyle(ipill).display !== 'none' : false,
                     hasVideo: !!iv,
                     hasScript: !!(fr.contentWindow && fr.contentWindow.__H1SUB__),
                 };
@@ -183,8 +228,10 @@ try {
         })()`);
     check('iframe 内确实有视频', s4.inner.hasVideo === true, JSON.stringify(s4.inner));
     check('iframe 内脚本已运行', s4.inner.hasScript === true);
-    check('面板挂在 iframe 里面且可见',
-        s4.inner.hasPanel === true && s4.inner.panelShown === true, JSON.stringify(s4.inner));
+    check('面板挂在 iframe 里面（不是挂在宿主页）',
+        s4.inner.hasPanel === true, JSON.stringify(s4.inner));
+    check('iframe 内的面板同样默认收起成小胶囊',
+        s4.inner.panelShown === false && s4.inner.pillShown === true, JSON.stringify(s4.inner));
     check('宿主页不显示完整面板（避免两层面板）', s4.topPanelShown === false,
         JSON.stringify(s4));
 

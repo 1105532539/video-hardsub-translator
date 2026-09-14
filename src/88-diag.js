@@ -8,7 +8,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.13.0';
+    const SCRIPT_VERSION = '1.13.1';
 
     const Diag = {
         modal: null,
@@ -150,7 +150,7 @@
                     p('  上次检测结果 ：');
                     for (const r of this.baiProbe) p('    ' + r.label + ' : ' + r.value);
                 } else {
-                    p('  （还没点过「① 检测浏览器 AI」，这里只有同步能拿到的信息）');
+                    p('  （还没点过「检测浏览器 AI」，这里只有同步能拿到的信息）');
                 }
                 p('');
             }
@@ -310,7 +310,7 @@
             }
 
             const hint = this.modal.querySelector('#h1sub-diag-hint');
-            if (!CFG.region) hint.textContent = '⚠️ 还没框选字幕区域 —— 请先点面板上的「① 框选字幕区」';
+            if (!CFG.region) hint.textContent = '⚠️ 还没框选字幕区域 —— 请先点面板上的「框选字幕区」';
             else if (!v) hint.textContent = '⚠️ 没找到视频元素 —— 请确认播放页已打开、视频已加载';
             else if (cropErr && cropErr.code === 'TAINTED') {
                 hint.textContent = '⚠️ 视频跨域且未发 CORS 头，画布被污染 → 点「开始」会自动请求「共享此标签页」授权';

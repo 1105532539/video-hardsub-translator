@@ -11,7 +11,9 @@ const BASE = `http://127.0.0.1:${PORT}`;
 
 const PRELUDE = `
 (function () {
-    const store = window.__gmStore = {};
+    // 面板**默认收成小胶囊**（见 CFG.panelOpen），而本套件多数用例要摸面板里的控件，
+    // 所以预置成"用户已选择保持展开"。专门验证默认收起的那几条会自己改这个值。
+    const store = window.__gmStore = { 'h1sub.panelOpen': true };
     window.__gmReqs = [];
     window.GM_getValue = function (k, d) { return (k in store) ? store[k] : d; };
     window.GM_setValue = function (k, v) { store[k] = v; };
@@ -1434,6 +1436,55 @@ try {
     check('没暂停时报告写「否」（这一行不是恒真）',
         /后台暂停\s*:\s*否/.test(repDiag2.report),
         (repDiag2.report.match(/.*后台暂停.*/) || ['(没找到该行)'])[0]);
+
+    // ─────────────────────────────────────────────
+    S('12j. 面板默认收起，且会把用户的选择记住');
+
+    // 需求：打开新网页时**不要**直接弹出大面板挡住视频，默认只留右下角小胶囊。
+    const panelPref = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const out = {};
+            out.defaultValue = H.DEFAULTS.panelOpen;
+            // 导入的配置里可能是字符串等脏值，必须强转成布尔
+            out.coerceTruthy = H.sanitizeCfg({ panelOpen: 'yes' }).panelOpen;
+            out.coerceFalsy = H.sanitizeCfg({ panelOpen: 0 }).panelOpen;
+            out.missing = H.sanitizeCfg({}).panelOpen;
+            return out;
+        })()`);
+    check('★ panelOpen 默认是 false（默认收起，不挡画面）',
+        panelPref.defaultValue === false, JSON.stringify(panelPref));
+    check('导入的脏值会被强转成布尔（不是原样透传）',
+        panelPref.coerceTruthy === true && panelPref.coerceFalsy === false,
+        JSON.stringify(panelPref));
+    check('缺失时兜回默认 false', panelPref.missing === false, String(panelPref.missing));
+
+    // rememberPanelOpen 只在**真的变了**的时候写盘（避免每个页面都写一次存储）
+    const remember = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const writes = [];
+            const orig = window.GM_setValue;
+            window.GM_setValue = function (k, v) { writes.push(k); return orig.apply(this, arguments); };
+
+            H.CFG.panelOpen = false;
+            H.UI.rememberPanelOpen(false);        // 没变 → 不该写
+            const afterSame = writes.slice();
+            H.UI.rememberPanelOpen(true);         // 变了 → 写一次
+            const afterChange = writes.slice();
+            H.UI.rememberPanelOpen(true);         // 再调一次 → 不该重复写
+            const afterRepeat = writes.slice();
+
+            window.GM_setValue = orig;
+            H.CFG.panelOpen = false;
+            return { afterSame, afterChange, afterRepeat, key: afterChange[0] };
+        })()`);
+    check('偏好没变时不写存储', remember.afterSame.length === 0, JSON.stringify(remember.afterSame));
+    check('★ 偏好变化时只写 panelOpen 这一个键（不是全量 40+ 项）',
+        remember.afterChange.length === 1 && remember.key === 'h1sub.panelOpen',
+        JSON.stringify(remember.afterChange));
+    check('重复设同一个值不会反复写盘',
+        remember.afterRepeat.length === 1, JSON.stringify(remember.afterRepeat));
 
     // ─────────────────────────────────────────────
     // destroy() 会把面板整个拆掉、els 清空，所以必须放在最后

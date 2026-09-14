@@ -411,7 +411,7 @@ await s.prompt([{
 
 | 约束 | 表现 | 脚本的处理 |
 | --- | --- | --- |
-| 下载要在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 下载只由面板「② 准备离线模型」触发 |
+| 下载要在用户手势里 | 模型未下载时 `create()` 抛 `Requires a user gesture when availability is "downloadable"` | 下载只由面板「准备离线模型」触发 |
 | 端侧模型声明语言没有中文 | `expectedOutputs: [{type:'text', languages:['zh']}]` → `unavailable`（`en`/`ja`/`fr`/`de`/`es` 可用） | 输出中文时不写 `expectedOutputs`；读图按源语言声明 |
 | 跨域 iframe 不可用 | `availability()` 抛错或返回 `unavailable` | `baiFrameNote()` 提前探测并给出提示 |
 | 流式分片语义未定 | 现为**累计**文本，规范讨论过改**增量** | `baiJoinChunk()` 两种都认 |

@@ -7,7 +7,10 @@ const PAGE_PORT = 8764;
 
 const PRELUDE = `
 (function () {
-    const store = {};
+    // 本套件测的是「面板展开时的布局」，而面板**默认是收成小胶囊的**
+    // （见 CFG.panelOpen）。所以这里预置成"用户已选择保持展开"，
+    // 否则量到的全是 display:none 下的零尺寸。
+    const store = { 'h1sub.panelOpen': true };
     window.__gmStore = store;
     window.GM_getValue = function (k, d) { return (k in store) ? store[k] : d; };
     window.GM_setValue = function (k, v) { store[k] = v; };
@@ -63,7 +66,7 @@ try {
 
     // 真正影响可用性的不是"设置项总高度"，而是"开始按钮要不要翻半天才能点到"。
     // 之前这里用的是任意的总高度阈值，结果每加一个设置项就误报一次。
-    check('「① 框选字幕区」和「开始」无需滚动即可看到',
+    check('「框选字幕区」和「开始」无需滚动即可看到',
         box.region === true && box.run === true,
         JSON.stringify({ region: box.region, run: box.run }));
     check(`设置项总高度没有失控（内容 ${box.bodyScroll}px）`,

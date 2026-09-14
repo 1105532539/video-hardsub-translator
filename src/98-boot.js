@@ -42,7 +42,7 @@
 
         const top = isTopFrame();
 
-        // ③ iframe：只有真的出现「像样的视频」才挂面板（否则每个广告 / 统计 iframe 都会长出一个）；顶层窗口没视频时先收成小胶囊。
+        // ③ iframe：只有真的出现「像样的视频」才挂面板（否则每个广告 / 统计 iframe 都会长出一个）。
         if (!top && !findVideo()) {
             watchForVideo(() => {
                 log('在嵌入的播放器里找到视频');
@@ -53,15 +53,16 @@
         }
 
         mountUI();
-        if (top && !findVideo()) UI.enterPillMode();
     }
 
     function mountUI() {
         if (UI.root) return;          // 已经挂过了
         UI.mount();
-        log('面板已加载。配置 API 后点「① 框选字幕区」，再点「开始」。');
+        log('面板已加载。配置 API 后点「框选字幕区」，再点「开始」。');
 
         if (!isConfigured()) {
+            // 把使用说明摊开：面板是收起的，用户点开胶囊时应该直接看到怎么配，
+            // 而不是一个空面板。（面板本身默认收起，见本函数末尾那段判定）
             if (UI.collapsed) {
                 UI.collapsed = false;
                 UI.els.body.style.display = 'block';
@@ -70,11 +71,18 @@
             const help = UI.root.querySelector('#h1sub-help');
             if (help) help.open = true;
             UI.setStatus(CFG.onboarded
-                ? '⚠️ 还没配置密钥 —— 选「快捷预设」→ 填 API Key → 点「测试 API」'
-                : '👋 第一次用：展开上面的「❓ 使用说明」，3 步就能跑起来', 'warn');
+                ? '⚠️ 还没配置密钥 —— 点右下角胶囊展开面板，选「快捷预设」→ 填 API Key'
+                : '👋 第一次用：点右下角的胶囊展开面板，里面「❓ 使用说明」几步就能跑起来', 'warn');
             CFG.onboarded = true;
             saveCfgKeys(CFG, ['onboarded']);
         }
+
+        // 打开页面时面板是展开还是收成小胶囊：
+        //   没视频 → 一律收起（大面板挡在没视频的页面上没有意义）
+        //   有视频 → 按用户上次的选择（CFG.panelOpen，**默认收起**）
+        // 注意这里**不写盘** —— 开机时只读取选择，只有用户主动点开关才 rememberPanelOpen()。
+        if (!findVideo() || !CFG.panelOpen) UI.enterPillMode();
+        else UI.leavePillMode();
 
         // ── 调试 / 测试钩子：暴露内部对象供自动化测试与诊断报告只读使用，不影响正常运行 ──
         try {
@@ -118,21 +126,24 @@
             warn('暴露调试钩子失败', e);
         }
 
-        GM_registerMenuCommand('显示/隐藏 字幕翻译面板', () => {
-            if (UI.pillMode) { UI.leavePillMode(); return; }
-            if (!UI.root) { mountUI(); UI.leavePillMode(); return; }
-            UI.root.style.display = UI.root.style.display === 'none' ? 'block' : 'none';
+                GM_registerMenuCommand('显示/隐藏 字幕翻译面板', () => {
+            if (!UI.root) { mountUI(); UI.leavePillMode(); UI.rememberPanelOpen(true); return; }
+            // 统一走胶囊模式，并记住这次选择（和点标题栏的 × / 点胶囊一致）
+            if (UI.pillMode) { UI.leavePillMode(); UI.rememberPanelOpen(true); }
+            else { UI.enterPillMode(); UI.rememberPanelOpen(false); }
         });
         GM_registerMenuCommand('框选字幕区域', () => RegionSelector.begin());
         GM_registerMenuCommand('开始/停止', () => Pipeline.toggle());
         GM_registerMenuCommand('在本站禁用（不再显示面板）', () => banCurrentHost());
 
-        // 视频可能是后加载 / SPA 切页后才出现
+        // 视频可能是后加载 / SPA 切页后才出现。
+        // ⚠️ 这里**不再自动展开面板** —— 用户明确要的是「打开新页面默认收起」，
+        //    所以视频出现时只更新状态栏，展开与否由用户点右下角的胶囊决定。
         watchForVideo(() => {
             log('已找到视频元素');
-            UI.setStatus('✅ 已找到视频，可以开始', 'ok');
-            // 之前因为没有视频而收成了小胶囊 → 现在自动展开
-            if (UI.pillMode) UI.leavePillMode();
+            UI.setStatus(UI.pillMode
+                ? '✅ 已找到视频 —— 点右下角胶囊展开面板，点「开始」'
+                : '✅ 已找到视频，可以开始', 'ok');
         });
 
         // 切到后台就暂停翻译：视频在后台标签页会继续播放，`video.paused` 是 false，

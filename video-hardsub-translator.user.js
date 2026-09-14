@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         网页视频硬字幕实时翻译（OCR + 第三方大模型 API）
 // @namespace    https://github.com/1105532539/video-hardsub-translator
-// @version      1.13.0
-// @description  任意网站通用：框选视频硬字幕区域，定时截图 → OCR → 第三方大模型 API 或浏览器内置端侧模型翻译成中文 → 悬浮字幕显示
+// @version      1.13.1
+// @description  任意网站通用：框选视频硬字幕区域，定时截图后由 OCR / 视觉大模型识别，再翻译成中文并以悬浮字幕盖回画面。五种引擎可选，其中两种不需要 API Key
 // @author       1105532539
 // @license      GPL-3.0-or-later
 // @homepageURL  https://github.com/1105532539/video-hardsub-translator
@@ -47,23 +47,29 @@
  *                        拿到纯文本后再交给大模型翻译。
  *                        识别引擎是 PaddleOCR，比浏览器内置方案强得多，
  *                        而且浏览器这边一个字节都不用下载。
- *    browser-ai（完全离线）：用浏览器**自带**的端侧模型（Chrome 138+ / Edge）
- *                        在本机完成识别与翻译 —— 不联网、不要 API Key、
- *                        原文不出设备、不产生任何费用。
- *                        识别可以配 Umi-OCR（推荐），也可以直接用端侧
- *                        多模态模型读图；翻译走端侧翻译模型。
- *                        代价：首次要点一次「准备离线模型」下载语言包，
- *                        且跨域 iframe 里的播放器默认用不了。
+ *    browser-ai（离线·免 Key）：用浏览器**自带**的端侧模型（Chrome ≥ 138 /
+ *                        Edge ≥ 148）在本机完成识别与翻译 —— 不要 API Key、
+ *                        不产生任何费用。识别可以配 Umi-OCR（推荐），也可以
+ *                        直接用端侧多模态模型读图；翻译走端侧翻译模型。
+ *                        ⚠️ 两点务必知道：
+ *                          · 首次要点一次「准备离线模型」下载语言包
+ *                            （**唯一**需要浏览器下载模型的引擎）；
+ *                          · 「不联网、原文不出设备」只在 **Chrome** 上成立。
+ *                            Edge 是同名 API 的另一套实现，是否完全本地未经
+ *                            证实，不要把它当作隐私保证。
+ *                        另外跨域 iframe 里的播放器默认用不了。
  *    web-translate（免 Key）：本机 Umi-OCR 识别 → 逆向免费网页接口翻译。
  *                        不用填任何 Key，但那些是各家**内部接口**、随时可能
  *                        失效，服务条款通常不允许第三方调用，仅建议自用。
  *    youdao-img：有道图片翻译 API，同样是 OCR + 翻译一步到位，
  *                        按量计费（不是免费额度）。
  *
- *  前四种引擎都**不需要浏览器下载任何模型**。
+ *  除 browser-ai 需要首次下载一次语言包外，其余四种都**不需要浏览器
+ *  下载任何模型**：openai-vision / youdao-img 走云端，umi-ocr 与本机
+ *  Umi-OCR 通信，web-translate 的识别同样由本机 Umi-OCR 完成。
  *
  *  ⚠️ 关于「思考模式」（思维链）：
- *    DeepSeek V4.1-Flash 默认开启思考模式，模型会先输出一大段推理再给答案。
+ *    DeepSeek 的 flash 系模型默认开启思考模式，会先输出一大段推理再给答案。
  *    这对「看字幕图 → 翻译」这种任务毫无必要，而且会吃掉输出预算，
  *    可能让正文变成空的（表现为"识别不出来"）。
  *    脚本默认对 DeepSeek 接口自动发送 {"thinking":{"type":"disabled"}} 关掉它。
@@ -76,13 +82,28 @@
  *    display 模式：用 getDisplayMedia 捕获当前标签页。一定能拿到像素，
  *                  但首次需要你手动授权「共享此标签页」。
  *
+ *  省钱（调用付费接口才是唯一成本，所以能跳就跳）：
+ *    · 画面没变 —— 用 32×16 灰度缩略图比对；同一张图**只买一次**，
+ *      无论它识别出来的是文字还是空。
+ *    · 区域里没文字 —— 用 160×48 边缘密度判断，字幕不在时不调接口。
+ *    · 和上一句太像 —— 相似度去重，避免字幕抖动导致的重复翻译。
+ *    · 切到后台标签页 —— 自动暂停。视频在后台**仍会继续播放**，
+ *      不暂停就是花钱翻译没人看得到的结果（可在面板关掉）。
+ *    · 出错按类型退避 —— 限流指数退避（封顶 60s）；而 Key / 地址 /
+ *      模型名填错这类问题会直接停下来提示你改，不会一直盲目重试。
+ *
  *  它会在哪些页面上出现（@match 已放开到所有网址，但不会到处乱挂）：
- *    · 页面上有 ≥200×120 的视频      → 直接显示完整面板
- *    · 页面上暂时没有视频            → 只留右下角一个小胶囊，点击才展开
- *    · 视频后来才加载（SPA/懒加载）  → 视频一出现，胶囊自动展开成面板
+ *    · 页面上有 ≥200×120 的视频      → 右下角留一个小胶囊，点开才是完整面板
+ *    · 页面上暂时没有视频            → 同样只有小胶囊
+ *    · 视频后来才加载（SPA/懒加载）  → **也不自动展开**，仍然等用户点
  *    · 视频被套在 iframe 里          → 面板挂在那个 iframe 内，不会出现两层
  *    · iframe 里没有视频             → 完全不挂（广告/统计框架不会被污染）
  *    · 你在某站点点过 🚫「本站禁用」 → 该站点彻底不介入
+ *
+ *  ⚙️ 面板默认收起（`CFG.panelOpen` 默认 false）：
+ *    一打开网页就弹出大面板会挡住画面，所以默认只留右下角小胶囊。
+ *    点开一次就被记住，以后打开新页面直接展开；点标题栏的 × 收起同理。
+ *    想恢复默认：高级 →「恢复默认」。
  *
  *  框选区域按网站分别记忆，换站不会串台。
  *
@@ -216,6 +237,9 @@
         offsetY: 0,                             // 垂直微调（px，正数往下）
         panelWidth: 320,                        // 面板宽度
         panelPos: null,                         // 面板位置 {left,top}，null=默认右下角
+        // 打开新页面时是否直接展开面板。默认 false = 只留右下角小胶囊，
+        // 免得每开一个视频页都被大面板挡住；用户点开一次后记住选择。
+        panelOpen: false,
 
         // ---- 首次运行引导 ----
         onboarded: false,
@@ -284,6 +308,7 @@
         cfg.smartSkip = cfg.smartSkip === undefined ? DEFAULTS.smartSkip : !!cfg.smartSkip;
         cfg.pauseWhenHidden = cfg.pauseWhenHidden === undefined
             ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
+        cfg.panelOpen = cfg.panelOpen === undefined ? DEFAULTS.panelOpen : !!cfg.panelOpen;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
 
         for (const k in NUM_RANGES) {
@@ -1328,13 +1353,18 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  48-browser-ai.js — 浏览器内置 AI：完全离线的识别 / 翻译
+    //  48-browser-ai.js — 浏览器内置 AI：免 Key 的识别 / 翻译
     //
-    //  路线：直接调用浏览器**自带**的端侧模型，不联网、不要 API Key、
-    //  原文不出设备、也不产生任何 API 费用。
+    //  路线：直接调用浏览器**自带**的模型，不要 API Key、不产生任何 API 费用。
     //
     //    Translator（Translation API）  —— 端侧翻译模型，快，专为翻译训练
     //    LanguageModel（Prompt API）    —— Gemini Nano，可看图（多模态）
+    //
+    //  ⚠️ 隐私边界（别把两家的实现混为一谈）：
+    //    · Chrome：端侧模型，语言包下载到本机，**不联网、原文不出设备**；
+    //    · Edge：同名 API 但是**另一套实现**，是否完全本地未经证实
+    //      （实测断网后 create() 直接挂死，说明它会去联网）——
+    //      **不要把它当作隐私保证**。详见 README 的 browser-ai 一节。
     //
     //  于是有两条组合（面板里「识别方式」自己选）：
     //    umi     ：Umi-OCR 认出原文 → Translator 翻译      （识别率最高，推荐）
@@ -1345,7 +1375,7 @@
     //
     //  ⚠️ 四条实测得出的硬约束（Chrome 153 / Edge 145，见 docs/ARCHITECTURE.md）：
     //   1. 会话创建会触发模型下载，而「下载」必须发生在**用户手势**里。
-    //      所以下载一律由面板上的「② 准备离线模型」按钮发起（baiPrepare），
+    //      所以下载一律由面板上的「准备离线模型」按钮发起（baiPrepare），
     //      主循环里只用已经建好的会话，绝不自己 create() 一个待下载的模型。
     //   2. 端侧模型**声明支持**的语言里没有中文（zh / ko / ru … 都会让
     //      availability() 直接返回 "unavailable"）。所以：
@@ -1451,7 +1481,7 @@
     //  语言名 → 语言码的映射表在 32-util.js（langCode），49-web-translate.js 用的是同一张表。
     const BAI_AVAIL_TEXT = {
         available: '✅ 已就绪（不用再下载）',
-        downloadable: '⬇️ 需要下载（点「② 准备离线模型」）',
+        downloadable: '⬇️ 需要下载（点「准备离线模型」）',
         downloading: '⏳ 正在下载…',
         unavailable: '❌ 不支持（语言对或能力不够）',
         unsupported: '❌ 这台浏览器没有这个 API',
@@ -1534,15 +1564,15 @@
         // 会话被 destroy() 会把在飞的 translate() 打断。正常路径不该发生（见 baiCache 的说明），
         if (baiIsAbort(e)) {
             return '翻译被中断了（端侧会话被重建：多半是刚改过语言/引擎设置，或页面正在切走）'
-                + '—— 重新点「② 准备离线模型」，或重新点「开始」即可';
+                + '—— 重新点「准备离线模型」，或重新点「开始」即可';
         }
         if (/generic failures occurred/i.test(m)) {
             return '这个浏览器的内置翻译不支持「' + baiPairText(pair) + '」这个语言对'
                 + '（Edge 上「日语 → 中文」必报 Generic failures）。'
-                + '可以：① 勾选「语言对不可用时经英语中转」；② 改用 Chrome；③ 换其它翻译引擎';
+                + '三条出路：勾选「语言对不可用时经英语中转」、改用 Chrome、或换其它翻译引擎';
         }
         if (/user gesture/i.test(m)) {
-            return '离线模型还没下载好 —— 请点面板上的「② 准备离线模型」'
+            return '离线模型还没下载好 —— 请点面板上的「准备离线模型」'
                 + '（浏览器只在用户点击时允许下载模型）';
         }
         if (/permissions policy|disallowed by permissions|not allowed/i.test(m)) {
@@ -3057,7 +3087,7 @@
             if (!canvas) {
                 // 区域跑到视频画面外了（滚动 / 播放器重排 / 换集）时 grab 会返回 null；
                 // 不提示的话用户只会看到"运行中…"不动。
-                UI.setStatus('截不到画面 —— 区域可能已不在视频上，请重新框选（① 框选字幕区）', 'warn');
+                UI.setStatus('截不到画面 —— 区域可能已不在视频上，请重新框选（「框选字幕区」）', 'warn');
                 return null;
             }
             return canvas;
@@ -3771,7 +3801,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.13.0';
+    const SCRIPT_VERSION = '1.13.1';
 
     const Diag = {
         modal: null,
@@ -3913,7 +3943,7 @@
                     p('  上次检测结果 ：');
                     for (const r of this.baiProbe) p('    ' + r.label + ' : ' + r.value);
                 } else {
-                    p('  （还没点过「① 检测浏览器 AI」，这里只有同步能拿到的信息）');
+                    p('  （还没点过「检测浏览器 AI」，这里只有同步能拿到的信息）');
                 }
                 p('');
             }
@@ -4073,7 +4103,7 @@
             }
 
             const hint = this.modal.querySelector('#h1sub-diag-hint');
-            if (!CFG.region) hint.textContent = '⚠️ 还没框选字幕区域 —— 请先点面板上的「① 框选字幕区」';
+            if (!CFG.region) hint.textContent = '⚠️ 还没框选字幕区域 —— 请先点面板上的「框选字幕区」';
             else if (!v) hint.textContent = '⚠️ 没找到视频元素 —— 请确认播放页已打开、视频已加载';
             else if (cropErr && cropErr.code === 'TAINTED') {
                 hint.textContent = '⚠️ 视频跨域且未发 CORS 头，画布被污染 → 点「开始」会自动请求「共享此标签页」授权';
@@ -4125,7 +4155,7 @@
             '<div id="h1sub-body" style="padding:10px;max-height:74vh;overflow:auto">',
 
             '  <div style="display:flex;gap:6px;margin-bottom:8px">',
-            '    <button id="h1sub-region" style="flex:1">① 框选字幕区</button>',
+            '    <button id="h1sub-region" style="flex:1">框选字幕区</button>',
             '    <button id="h1sub-run" style="flex:1">开始</button>',
             '  </div>',
             '  <div id="h1sub-region-info" style="color:#8b93a7;margin-bottom:6px">区域：未设定</div>',
@@ -4134,36 +4164,37 @@
             '  </div>',
 
             '  <details id="h1sub-help" style="margin:0 0 9px;background:#0f1116;border:1px solid #2c313a;border-radius:6px">',
-            '    <summary style="cursor:pointer;padding:6px 9px;color:#7dd3fc;user-select:none">❓ 使用说明（3 步上手）</summary>',
+            '    <summary style="cursor:pointer;padding:6px 9px;color:#7dd3fc;user-select:none">❓ 使用说明</summary>',
             '    <div style="padding:2px 10px 10px;color:#9aa3b8;line-height:1.75;user-select:text">',
-            '      <b style="color:#e6e8ee">1️⃣ 配引擎</b><br>',
-            '      「快捷预设」一键填好地址和模型 → 填你自己的 API Key → 点「测试 API」看到绿色成功。<br>',
-            '      💾 配好后点「<b style="color:#9aa3b8">保存当前配置</b>」存成一套档案，',
-            '      以后在「我的配置」下拉框里<b style="color:#9aa3b8">一键切换</b>不同的大模型，不用重打 Key。<br>',
-            '      <span style="color:#fbbf24">⚠️ 注意：模型必须支持图片输入。</span>',
-            '      DeepSeek 这边统一用 <b>deepseek-flash</b>（支持图片，两个 v4-flash 旧名同样可以）；',
-            '      deepseek-v4-pro 和 deepseek-chat 不支持图片，选到它们要配「Umi-OCR 本地识别」引擎。<br><br>',
-            '      <b style="color:#e6e8ee">2️⃣ 框字幕</b><br>',
-            '      点「① 框选字幕区」，在画面上<b>只框住字幕那一行</b>。框太大会把画面一起 OCR 进去。<br><br>',
-            '      <b style="color:#e6e8ee">3️⃣ 开始</b><br>',
-            '      点「开始」，中文译文会浮在原字幕位置，自动跟随。<br><br>',
-            '      <b style="color:#e6e8ee">🔌 想完全离线（不要 Key、不联网、不花钱）？</b><br>',
-            '      引擎选「浏览器内置 AI」→ 点「② 准备离线模型」，等语言包下载完就能用；',
-            '      识别方式建议配 Umi-OCR（识别率最高）。<br>',
-            '      前提：Chrome 138+ 桌面版（或 Edge）、页面是 HTTPS 或 localhost、',
-            '      且不是跨域 iframe。<br><br>',
-            '      <b style="color:#e6e8ee">🔍 框歪了 / 识别不准？</b><br>',
-            '      点「🔍 诊断模式」，左边看红框（脚本实际截取范围），右边看实际截到的图。<br>',
-            '      里面的「复制报告」能一键导出排查信息。<br><br>',
-            '      <b style="color:#e6e8ee">🎬 画面读不出来（视频跨域）？</b><br>',
+            '      <b style="color:#e6e8ee">先选一条路线</b><br>',
+            '      五种引擎里，<b style="color:#9aa3b8">不要 API Key</b> 的只有两种：浏览器内置 AI、免费网页接口。<br>',
+            '      · <b style="color:#9aa3b8">最省事</b>：视觉大模型 —— 选「快捷预设」→ 填 Key → 点「测试 API」。<br>',
+            '      · <b style="color:#9aa3b8">完全离线</b>：浏览器内置 AI —— 点「准备离线模型」，等语言包下载完（仅 Chrome 真正离线）。<br>',
+            '      · <b style="color:#9aa3b8">不想填 Key</b>：免费网页接口 —— 需先装好本机 Umi-OCR。<br>',
+            '      · <b style="color:#9aa3b8">最省钱</b>：Umi-OCR 本地识别 —— 本机认字，翻译只花文本模型的钱（比视觉模型便宜得多）。<br>',
+            '      · <b style="color:#9aa3b8">已有有道账号</b>：有道图片翻译 —— 一次调用完成识别 + 翻译，按量计费。<br>',
+            '      <span style="color:#fbbf24">⚠️ 视觉大模型必须选支持图片输入的模型。</span>',
+            '      DeepSeek 这边统一用 <b>deepseek-flash</b>（两个 v4-flash 旧名同样可以）；',
+            '      选到不支持图片的预设时面板会提示，并自动切到「Umi-OCR 本地识别」。<br><br>',
+            '      <b style="color:#e6e8ee">配好后记得存成档案</b><br>',
+            '      点「保存当前配置」把这一套（地址 + Key + 模型）存下来，',
+            '      以后在「我的配置」里<b style="color:#9aa3b8">一键切换</b>，不用重打 Key。<br><br>',
+            '      <b style="color:#e6e8ee">框选字幕区</b><br>',
+            '      在画面上<b>只框住字幕那一行</b>。框太大会把画面一起 OCR 进去，',
+            '      既费钱又容易认错。框完可以直接点「开始」。<br><br>',
+            '      <b style="color:#e6e8ee">框歪了 / 识别不准？</b><br>',
+            '      点「诊断模式」：左边看红框（脚本实际截取范围），右边看实际截到的图，',
+            '      红框有没有正好套住字幕一眼就能看出来。「复制报告」可一键导出排查信息。<br><br>',
+            '      <b style="color:#e6e8ee">画面读不出来（视频跨域）？</b><br>',
             '      「截图方式」改成「标签页捕获」→ 点「申请共享授权」→ 弹窗里选<b>当前标签页</b>。<br>',
             '      <span style="color:#fbbf24">注意：这种模式下别让译文框压住原字幕，否则会被一起截进去。</span><br><br>',
             '      <b style="color:#e6e8ee">💾 换电脑 / 备份配置</b><br>',
             '      高级 →「导出配置」出 JSON，「导入配置」粘回去。<br><br>',
             '      <b style="color:#e6e8ee">🌐 这个脚本在所有网站都能用</b><br>',
-            '      页面上没视频时，它会收成右下角一个小胶囊，不挡内容；<br>',
-            '      视频一出现就自动展开。<b>不想在某站出现？</b>点标题栏的 🚫，<br>',
-            '      以后想恢复：高级 →「恢复「本站禁用」的网站」。<br>',
+            '      面板<b>默认收成右下角的小胶囊</b>，不挡画面 —— 点一下才展开，',
+            '      而且会记住你的选择（点标题栏的 × 可以再收起来）。<br>',
+            '      <b>不想在某站出现？</b>点标题栏的 🚫，以后想恢复：',
+            '      高级 →「恢复「本站禁用」的网站」。<br>',
             '      框选区域会<b>按网站分别记住</b>，换站不会串台。',
             '    </div>',
             '  </details>',
@@ -4173,7 +4204,7 @@
             '    <select id="h1sub-engine">',
             '      <option value="openai-vision">视觉大模型（OCR+翻译一步，推荐）</option>',
             '      <option value="umi-ocr">Umi-OCR 本地识别（识别率最高·零下载）</option>',
-            '      <option value="browser-ai">浏览器内置 AI（完全离线·不要 Key·不要联网）</option>',
+            '      <option value="browser-ai">浏览器内置 AI（不要 Key·不要钱·Chrome 上离线）</option>',
             '      <option value="web-translate">免费网页接口（不要 Key·需本机 Umi-OCR）</option>',
             '      <option value="youdao-img">有道图片翻译 API（OCR+翻译一步）</option>',
             '    </select>',
@@ -4242,8 +4273,8 @@
             '      所以「识别方式」不能用「浏览器内置读图」，请用 Umi-OCR。',
             '    </div>',
             '    <div style="display:flex;gap:6px">',
-            '      <button id="h1sub-bai-probe" style="flex:1">① 检测浏览器 AI</button>',
-            '      <button id="h1sub-bai-prepare" style="flex:1">② 准备离线模型</button>',
+            '      <button id="h1sub-bai-probe" style="flex:1">检测浏览器 AI</button>',
+            '      <button id="h1sub-bai-prepare" style="flex:1">准备离线模型</button>',
             '    </div>',
             '    <progress id="h1sub-bai-bar" max="1" value="0" style="display:none;margin-top:6px"></progress>',
             '    <div id="h1sub-bai-status" style="margin-top:5px;min-height:0;white-space:pre-wrap"></div>',
@@ -4598,7 +4629,10 @@
             ].join(';');
             b.addEventListener('mouseenter', () => { b.style.opacity = '1'; });
             b.addEventListener('mouseleave', () => { b.style.opacity = '.8'; });
-            b.addEventListener('click', () => this.leavePillMode());
+            b.addEventListener('click', () => {
+                this.leavePillMode();
+                this.rememberPanelOpen(true);      // 用户主动点开 → 以后都展开
+            });
             uiHost().appendChild(b);
             this.pillEl = b;
             return b;
@@ -4617,6 +4651,17 @@
             if (this.pillEl) this.pillEl.style.display = 'none';
             this.root.style.display = 'block';
             this.applyLayout();
+        },
+
+        /**
+         * 记住「面板是展开还是收起」，下次打开新页面照这个来。
+         * 只写一个键（全量 saveCfg 要动 40+ 个存储项）。
+         * 只在**用户主动切换**时调用 —— 开机时按配置决定显隐，不该反过来写配置。
+         */
+        rememberPanelOpen(open) {
+            if (!!CFG.panelOpen === !!open) return;      // 没变就不写盘
+            CFG.panelOpen = !!open;
+            saveCfgKeys(CFG, ['panelOpen']);
         },
 
         /** 彻底从页面移除（本站禁用时用） */
@@ -4669,7 +4714,11 @@
             const e = this.els;
 
             // 折叠 / 关闭（关闭 = 收成右下角小胶囊，随时能点回来）
-            e.close.onclick = () => this.enterPillMode();
+            // 关闭时记住这个选择：以后打开新页面也直接收成胶囊，不再自动展开。
+            e.close.onclick = () => {
+                this.enterPillMode();
+                this.rememberPanelOpen(false);
+            };
             e.collapse.onclick = () => {
                 this.collapsed = !this.collapsed;
                 e.body.style.display = this.collapsed ? 'none' : 'block';
@@ -5598,7 +5647,7 @@
             this.renderBanInfo();
             this.setBaiBar(null);
             this.setBaiStatus(CFG.engine === 'browser-ai'
-                ? '点「① 检测浏览器 AI」看这台机器支不支持；首次使用还要点「② 准备离线模型」'
+                ? '点「检测浏览器 AI」看这台机器支不支持；首次使用还要点「准备离线模型」'
                 : '', '#5c6478');
         },
 
@@ -5802,7 +5851,7 @@
 
         const top = isTopFrame();
 
-        // ③ iframe：只有真的出现「像样的视频」才挂面板（否则每个广告 / 统计 iframe 都会长出一个）；顶层窗口没视频时先收成小胶囊。
+        // ③ iframe：只有真的出现「像样的视频」才挂面板（否则每个广告 / 统计 iframe 都会长出一个）。
         if (!top && !findVideo()) {
             watchForVideo(() => {
                 log('在嵌入的播放器里找到视频');
@@ -5813,15 +5862,16 @@
         }
 
         mountUI();
-        if (top && !findVideo()) UI.enterPillMode();
     }
 
     function mountUI() {
         if (UI.root) return;          // 已经挂过了
         UI.mount();
-        log('面板已加载。配置 API 后点「① 框选字幕区」，再点「开始」。');
+        log('面板已加载。配置 API 后点「框选字幕区」，再点「开始」。');
 
         if (!isConfigured()) {
+            // 把使用说明摊开：面板是收起的，用户点开胶囊时应该直接看到怎么配，
+            // 而不是一个空面板。（面板本身默认收起，见本函数末尾那段判定）
             if (UI.collapsed) {
                 UI.collapsed = false;
                 UI.els.body.style.display = 'block';
@@ -5830,11 +5880,18 @@
             const help = UI.root.querySelector('#h1sub-help');
             if (help) help.open = true;
             UI.setStatus(CFG.onboarded
-                ? '⚠️ 还没配置密钥 —— 选「快捷预设」→ 填 API Key → 点「测试 API」'
-                : '👋 第一次用：展开上面的「❓ 使用说明」，3 步就能跑起来', 'warn');
+                ? '⚠️ 还没配置密钥 —— 点右下角胶囊展开面板，选「快捷预设」→ 填 API Key'
+                : '👋 第一次用：点右下角的胶囊展开面板，里面「❓ 使用说明」几步就能跑起来', 'warn');
             CFG.onboarded = true;
             saveCfgKeys(CFG, ['onboarded']);
         }
+
+        // 打开页面时面板是展开还是收成小胶囊：
+        //   没视频 → 一律收起（大面板挡在没视频的页面上没有意义）
+        //   有视频 → 按用户上次的选择（CFG.panelOpen，**默认收起**）
+        // 注意这里**不写盘** —— 开机时只读取选择，只有用户主动点开关才 rememberPanelOpen()。
+        if (!findVideo() || !CFG.panelOpen) UI.enterPillMode();
+        else UI.leavePillMode();
 
         // ── 调试 / 测试钩子：暴露内部对象供自动化测试与诊断报告只读使用，不影响正常运行 ──
         try {
@@ -5878,21 +5935,24 @@
             warn('暴露调试钩子失败', e);
         }
 
-        GM_registerMenuCommand('显示/隐藏 字幕翻译面板', () => {
-            if (UI.pillMode) { UI.leavePillMode(); return; }
-            if (!UI.root) { mountUI(); UI.leavePillMode(); return; }
-            UI.root.style.display = UI.root.style.display === 'none' ? 'block' : 'none';
+                GM_registerMenuCommand('显示/隐藏 字幕翻译面板', () => {
+            if (!UI.root) { mountUI(); UI.leavePillMode(); UI.rememberPanelOpen(true); return; }
+            // 统一走胶囊模式，并记住这次选择（和点标题栏的 × / 点胶囊一致）
+            if (UI.pillMode) { UI.leavePillMode(); UI.rememberPanelOpen(true); }
+            else { UI.enterPillMode(); UI.rememberPanelOpen(false); }
         });
         GM_registerMenuCommand('框选字幕区域', () => RegionSelector.begin());
         GM_registerMenuCommand('开始/停止', () => Pipeline.toggle());
         GM_registerMenuCommand('在本站禁用（不再显示面板）', () => banCurrentHost());
 
-        // 视频可能是后加载 / SPA 切页后才出现
+        // 视频可能是后加载 / SPA 切页后才出现。
+        // ⚠️ 这里**不再自动展开面板** —— 用户明确要的是「打开新页面默认收起」，
+        //    所以视频出现时只更新状态栏，展开与否由用户点右下角的胶囊决定。
         watchForVideo(() => {
             log('已找到视频元素');
-            UI.setStatus('✅ 已找到视频，可以开始', 'ok');
-            // 之前因为没有视频而收成了小胶囊 → 现在自动展开
-            if (UI.pillMode) UI.leavePillMode();
+            UI.setStatus(UI.pillMode
+                ? '✅ 已找到视频 —— 点右下角胶囊展开面板，点「开始」'
+                : '✅ 已找到视频，可以开始', 'ok');
         });
 
         // 切到后台就暂停翻译：视频在后台标签页会继续播放，`video.paused` 是 false，

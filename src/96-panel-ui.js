@@ -114,7 +114,10 @@
             ].join(';');
             b.addEventListener('mouseenter', () => { b.style.opacity = '1'; });
             b.addEventListener('mouseleave', () => { b.style.opacity = '.8'; });
-            b.addEventListener('click', () => this.leavePillMode());
+            b.addEventListener('click', () => {
+                this.leavePillMode();
+                this.rememberPanelOpen(true);      // 用户主动点开 → 以后都展开
+            });
             uiHost().appendChild(b);
             this.pillEl = b;
             return b;
@@ -133,6 +136,17 @@
             if (this.pillEl) this.pillEl.style.display = 'none';
             this.root.style.display = 'block';
             this.applyLayout();
+        },
+
+        /**
+         * 记住「面板是展开还是收起」，下次打开新页面照这个来。
+         * 只写一个键（全量 saveCfg 要动 40+ 个存储项）。
+         * 只在**用户主动切换**时调用 —— 开机时按配置决定显隐，不该反过来写配置。
+         */
+        rememberPanelOpen(open) {
+            if (!!CFG.panelOpen === !!open) return;      // 没变就不写盘
+            CFG.panelOpen = !!open;
+            saveCfgKeys(CFG, ['panelOpen']);
         },
 
         /** 彻底从页面移除（本站禁用时用） */
@@ -185,7 +199,11 @@
             const e = this.els;
 
             // 折叠 / 关闭（关闭 = 收成右下角小胶囊，随时能点回来）
-            e.close.onclick = () => this.enterPillMode();
+            // 关闭时记住这个选择：以后打开新页面也直接收成胶囊，不再自动展开。
+            e.close.onclick = () => {
+                this.enterPillMode();
+                this.rememberPanelOpen(false);
+            };
             e.collapse.onclick = () => {
                 this.collapsed = !this.collapsed;
                 e.body.style.display = this.collapsed ? 'none' : 'block';
@@ -1114,7 +1132,7 @@
             this.renderBanInfo();
             this.setBaiBar(null);
             this.setBaiStatus(CFG.engine === 'browser-ai'
-                ? '点「① 检测浏览器 AI」看这台机器支不支持；首次使用还要点「② 准备离线模型」'
+                ? '点「检测浏览器 AI」看这台机器支不支持；首次使用还要点「准备离线模型」'
                 : '', '#5c6478');
         },
 
