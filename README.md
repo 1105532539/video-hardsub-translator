@@ -4,7 +4,7 @@
 > 不依赖任何后端服务，一个用户脚本文件即装即用；五种引擎里有四种无需浏览器下载模型（唯一会下载模型的「浏览器内置 AI」引擎，下载的是 Chrome 自带的端侧模型）。
 
 [![Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-595525-orange.svg)](https://greasyfork.org/zh-CN/scripts/595525)
-![version](https://img.shields.io/badge/version-1.13.1-blue.svg)
+![version](https://img.shields.io/badge/version-1.14.0-blue.svg)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
 ![runtime](https://img.shields.io/badge/runtime-Node.js%20%E2%89%A5%2022-brightgreen.svg)
