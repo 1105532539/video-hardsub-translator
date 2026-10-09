@@ -1,6 +1,6 @@
 name: CI
 
-# 两条硬性规则靠这里变成机器强制（CONTRIBUTING.md 要求 444 项全过、
+# 两条硬性规则靠这里变成机器强制（CONTRIBUTING.md 要求全部测试通过、
 # 且产物必须与 src/ 一致，此前完全依赖人工自觉）。
 on:
   push:
@@ -26,12 +26,12 @@ jobs:
       - name: 产物语法检查
         run: node --check video-hardsub-translator.user.js
 
-  # ── ② 8 个测试套件 ────────────────────────────────────────────────
+  # ── ② 9 个测试文件（构建守卫 + 8 个浏览器套件）────────────────────
   #  必须串行：各套件用固定端口（见 docs/TESTING.md「CI 集成」）。
   #  用 windows-latest 与作者本机环境对齐 —— 此前各套件只在 Windows 上验证过。
   #  Chrome 已预装在 cdp.mjs 的默认路径，无需额外安装。
   test:
-    name: 8 个测试套件（串行）
+    name: 9 个测试文件（串行）
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -287,13 +287,14 @@ for (let i = 0; i < vids.length; i++) {
 npm run build:check          # 产物是否与 src/ 一致（改了 src/ 却忘了构建，这里会失败）
 npm run lint                 # 构建 + node --check 语法检查
 
-npm test                     # 全部 8 个套件（会自动先跑一次 npm run build）
+npm test                     # 全部 9 个测试文件：构建守卫 + 8 个浏览器套件（会自动先跑一次 npm run build）
 
+node _test/build.mjs         # 期望 27/27
 node _test/engine.mjs        # 期望 50/50
-node _test/browser-ai.mjs    # 期望 94/94
+node _test/browser-ai.mjs    # 期望 96/96
 node _test/web-translate.mjs # 期望 44/44
-node _test/opt.mjs           # 期望 76/76
-node _test/allsite.mjs       # 期望 37/37
+node _test/opt.mjs           # 期望 180/180
+node _test/allsite.mjs       # 期望 44/44
 node _test/smoke-panel.mjs   # 期望 79/79
 node _test/layout.mjs        # 期望 33/33
 node _test/fullscreen.mjs    # 期望 31/31
