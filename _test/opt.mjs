@@ -1047,7 +1047,7 @@ try {
 
             const run = (rounds) => {
                 P.resetFrameState();
-                P.stats = { shots: 0, apiCalls: 0, skipped: 0, errors: 0 };
+                P.resetStats();
                 const decisions = [];
                 for (let i = 0; i < rounds; i++) {
                     const skip = P.shouldSkipFrame(canvas);
@@ -1485,6 +1485,620 @@ try {
         JSON.stringify(remember.afterChange));
     check('重复设同一个值不会反复写盘',
         remember.afterRepeat.length === 1, JSON.stringify(remember.afterRepeat));
+
+    // ─────────────────────────────────────────────
+    S('12k. P1-3 点「停止」时真正取消在飞请求（不是只丢结果）');
+
+    // 关键区别：以前只是"结果不要了"（gen 对不上就丢弃），请求还在服务端跑完，
+    // 那段 token 照样计费。现在要让管理器**真的 abort** 掉它。
+    const abortFlight = await evAsync(`
+        (async () => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            const v = H.findVideo();
+            const bx = H.getContentBox(v);
+            const PA = window.__PATTERN__;
+            const saved = {
+                engine: H.CFG.engine, apiBase: H.CFG.apiBase, apiKey: H.CFG.apiKey,
+                smartSkip: H.CFG.smartSkip, region: H.CFG.region, sampleMode: H.CFG.sampleMode,
+            };
+            H.CFG.region = {
+                x: bx.left,
+                y: bx.top + (PA.BAND_Y / v.videoHeight) * bx.height,
+                w: bx.width,
+                h: (PA.BAND_H / v.videoHeight) * bx.height,
+            };
+            H.CFG.engine = 'openai-vision';
+            H.CFG.apiBase = 'https://api.deepseek.com';
+            H.CFG.apiKey = 'sk-abc';
+            H.CFG.smartSkip = false;
+            H.CFG.sampleMode = 'interval';
+
+            // 装一个"永远不会回调"的传输层：只有我们主动 abort 才能让这个请求收场
+            const orig = window.GM_xmlhttpRequest;
+            let handles = 0, aborted = 0, bytes = 0;
+            window.GM_xmlhttpRequest = function (opts) {
+                handles++;
+                bytes += String(opts.data || '').length;
+                return { abort() { aborted++; } };
+            };
+
+            P.resetFrameState();
+            P.running = true;
+            const flying = P.step();
+            await sleep(120);                     // 等它把请求发出去
+            const busyDuring = P.busy;
+            P.stop();                             // ← 用户点了停止
+            let threw = null;
+            try { await flying; } catch (e) { threw = String((e && e.message) || e); }
+            const busyAfter = P.busy;
+
+            // ---- 反证：作用域外创建的请求不该被流水线的停止误伤 ----
+            let outsideAborted = 0;
+            window.GM_xmlhttpRequest = function () {
+                return { abort() { outsideAborted++; } };
+            };
+            const outside = H.gmRequest({ url: 'https://example.com/x', data: '{}' });
+            outside.catch(() => {});              // 它注定不会成功，别让它变成未处理拒绝
+            await sleep(20);
+            P.running = true;
+            P.stop();
+            await sleep(40);
+
+            window.GM_xmlhttpRequest = orig;
+            Object.assign(H.CFG, saved);
+            P.running = false;
+            return { handles, aborted, threw, busyDuring, busyAfter, outsideAborted, bytes };
+        })()`);
+
+    check('停止时确实把请求发出去了（否则这条测试是空转）',
+        abortFlight.handles === 1 && abortFlight.bytes > 100, JSON.stringify(abortFlight));
+    check('★ 停止会真的调用管理器的 abort()（不再让服务端把没用的回复生成完）',
+        abortFlight.aborted === 1, JSON.stringify(abortFlight));
+    check('★ 取消不算失败：step() 不抛出、错误计数不增加',
+        abortFlight.threw === null, String(abortFlight.threw));
+    check('取消后 busy 已复位（不会把「重新开始」静默吞掉）',
+        abortFlight.busyDuring === true && abortFlight.busyAfter === false,
+        JSON.stringify(abortFlight));
+    check('作用域外创建的请求（手动截图等）不受流水线停止的影响',
+        abortFlight.outsideAborted === 0, String(abortFlight.outsideAborted));
+
+    // ─────────────────────────────────────────────
+    S('12l. P2-1c 先判重、再付钱（相似句不再先花钱再丢弃）');
+
+    const dedupe = await evAsync(`
+        (async () => {
+            const H = window.__H1SUB__;
+            window.__gmResponse = ${JSON.stringify(okResp('来自接口的译文'))};
+            window.__gmDelay = 0;
+
+            const hits0 = H.dedupeStats.prePayHits;
+
+            // ① 与屏幕上那句完全相同 → 复用屏幕上的译文，一次请求都不发
+            H.setShown('同一句话', '已经在屏幕上的译文');
+            const n0 = window.__gmReqs.length;
+            const r1 = await H.translateText('同一句话');
+            const n1 = window.__gmReqs.length;
+
+            // ② 只差一个标点（字幕抖动的典型样子）→ 仍然算同一句
+            H.setShown('同一句话', '已经在屏幕上的译文');
+            const r2 = await H.translateText('同一句话。');
+            const n2 = window.__gmReqs.length;
+
+            // ③ 反证：把「屏幕上那句」清掉 → 同一段文字必须真的发请求
+            //    （没有这一条，上面两条可能只是"请求恰好没发出去"）
+            H.setShown('', '');
+            const r3 = await H.translateText('完全另一句话——反证用');
+            const n3 = window.__gmReqs.length;
+
+            // ④ 上一句在屏幕上但**没有译文**时不能命中：否则会返回空串，
+            //    被 present() 判成「只认出原文、没拿到译文」
+            H.setShown('只有原文没有译文的一句', '');
+            const r4 = await H.translateText('只有原文没有译文的一句');
+            const n4 = window.__gmReqs.length;
+            const hitsEnd = H.dedupeStats.prePayHits;
+
+            H.setShown('', '');
+            return {
+                r1, r2, r3, r4,
+                prePayHits: hitsEnd - hits0,
+                reqs1: n1 - n0, reqs2: n2 - n1, reqs3: n3 - n2, reqs4: n4 - n3,
+            };
+        })()`);
+
+    check('★ 与屏幕上完全相同的句子：直接复用译文，零请求',
+        dedupe.r1 === '已经在屏幕上的译文' && dedupe.reqs1 === 0, JSON.stringify(dedupe));
+    check('相似但不是逐字相同的句子同样免付费（这正是翻译缓存覆盖不到的那部分）',
+        dedupe.r2 === '已经在屏幕上的译文' && dedupe.reqs2 === 0, JSON.stringify(dedupe));
+    check('★ 反证：清掉屏幕状态后同一段文字会真的发请求（证明判重不是恒真）',
+        dedupe.reqs3 === 1 && dedupe.r3 === '来自接口的译文', JSON.stringify(dedupe));
+    check('屏幕上那句没有译文时不走判重（否则会返回空串、被当成"没翻译出来"）',
+        dedupe.reqs4 === 1 && dedupe.r4 === '来自接口的译文', JSON.stringify(dedupe));
+    check('免付费判重次数被记录（可以从这里看出这条到底省了多少次调用）',
+        dedupe.prePayHits === 2, String(dedupe.prePayHits));
+
+    // ─────────────────────────────────────────────
+    S('12m. P2-1c（续）跳过原因分开计数 + 重复帧不再重复购买');
+
+    const reasons = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const mk = (text) => {
+                const c = document.createElement('canvas');
+                c.width = 640; c.height = 60;
+                const x = c.getContext('2d');
+                x.fillStyle = '#000'; x.fillRect(0, 0, 640, 60);
+                x.fillStyle = '#fff'; x.font = 'bold 44px sans-serif';
+                x.textBaseline = 'middle'; x.fillText(text, 10, 30);
+                return c;
+            };
+            const a = mk('AAAA');
+            const b = mk('BBBB');
+
+            const savedSmart = H.CFG.smartSkip;
+            H.CFG.smartSkip = false;              // 只考察"画面没变"这条路
+
+            // ---- ① 同一张静止图连看两轮：第二轮必须记在 noChange 名下 ----
+            P.resetFrameState();
+            const noChange0 = P.stats.skipNoChange;
+            const first = P.shouldSkipFrame(a);    // 第一轮：没有 lastThumb，不该跳过
+            P.lastSentThumb = P.lastThumb;         // 模拟 recognize() 已经把它买下来了
+            const second = P.shouldSkipFrame(a);   // 第二轮：逐像素相同 → 跳过
+            const noChange1 = P.stats.skipNoChange;
+
+            // ---- ② 「上次买回来又被判为重复句」的那一帧，不该再买 ----
+            P.resetFrameState();
+            P.rememberShown('上一句', '上一句的译文');   // 屏幕上有那句，判据才成立
+            P.lastSentThumb = H.thumbnail(b);
+            P.lastThumb = H.thumbnail(b);          // 上一轮看的是另一个画面
+            P.repeatThumbs = [H.thumbnail(a)];     // 而 a 这一帧的答案上次被丢掉了
+            const repeat0 = P.stats.skipRepeat;
+            const repeatSkipped = P.shouldSkipFrame(a);
+            const repeat1 = P.stats.skipRepeat;
+
+            // ---- ③ 反证：容差必须紧到"换了字就不认" ----
+            const closeSelf = H.thumbClose(H.thumbnail(a), H.thumbnail(a));
+            const closeDiff = H.thumbClose(H.thumbnail(a), H.thumbnail(b));
+            const diffVal = H.thumbDiff(H.thumbnail(a), H.thumbnail(b));
+
+            H.CFG.smartSkip = savedSmart;
+            P.resetFrameState();
+            return {
+                first, second, noChangeAdded: noChange1 - noChange0,
+                repeatSkipped, repeatAdded: repeat1 - repeat0,
+                closeSelf, closeDiff, diffVal,
+                hasCounters: typeof P.stats.skipNoText === 'number'
+                    && typeof P.stats.skipNoChange === 'number'
+                    && typeof P.stats.skipRepeat === 'number',
+            };
+        })()`);
+
+    check('跳过原因分开计数（noChange / noText / repeat 三个都有）',
+        reasons.hasCounters === true, JSON.stringify(reasons));
+    check('第一轮不跳、第二轮因"画面没变"跳过，且记在 skipNoChange 名下',
+        reasons.first === false && reasons.second === true && reasons.noChangeAdded === 1,
+        JSON.stringify(reasons));
+    check('★ 上次买过又被判为重复句的那一帧，下次直接跳过（skipRepeat 计数 +1）',
+        reasons.repeatSkipped === true && reasons.repeatAdded === 1, JSON.stringify(reasons));
+    check('thumbClose 认自己（同一张图判为同帧）', reasons.closeSelf === true,
+        JSON.stringify(reasons));
+    check('★ 反证：换成另一句台词的画面就不认了（否则会静默显示上一句的译文）',
+        reasons.closeDiff === false, JSON.stringify(reasons));
+
+
+
+    // ─────────────────────────────────────────────
+    S('12n. P3-8 「最近识别」复用节点：零分配、零 HTML 解析');
+
+    const hist = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const U = H.UI;
+            const el = U.els.hist;
+            if (!el) return { err: '面板里没有 #h1sub-hist' };
+
+            // 从干净状态开始（模拟面板刚建好）
+            el.textContent = '';
+            U._histRows = null;
+            U._histOwner = null;
+
+            U.pushHistory('预热', '预热');          // 触发一次预建
+            let created = 0;
+            const origCreate = document.createElement;
+            document.createElement = function () { created++; return origCreate.apply(document, arguments); };
+
+            for (let i = 1; i <= 40; i++) U.pushHistory('原文#' + i + '#', '译文#' + i + '#');
+
+            document.createElement = origCreate;
+
+            const rows = Array.from(el.children);
+            const txt = rows.map(r => r.textContent);
+            const orderOf = (needle) => {
+                const row = rows.find(r => r.textContent.indexOf(needle) >= 0);
+                return row ? Number(row.style.order) : null;
+            };
+            const visible = rows.filter(r => r.style.display !== 'none' && r.style.display !== '');
+
+            // 注入：文本必须原样显示，不能被当成 HTML 解析
+            U.pushHistory('<b>x</b>', '<i>y</i>');
+            const injectRow = rows.find(r => r.textContent.indexOf('<b>x</b>') >= 0);
+
+            return {
+                createdDuring: created,
+                rowCount: rows.length,
+                visibleRows: visible.length,
+                has40: txt.some(t => t.indexOf('原文#40#') >= 0),
+                has11: txt.some(t => t.indexOf('原文#11#') >= 0),
+                has10: txt.some(t => t.indexOf('原文#10#') >= 0),
+                has1: txt.some(t => t.indexOf('原文#1#') >= 0),
+                order40: orderOf('原文#40#'),
+                order39: orderOf('原文#39#'),
+                injected: !!injectRow,
+                injectedHtml: injectRow ? injectRow.innerHTML : '',
+                injectedText: injectRow ? injectRow.textContent : '',
+                bothLines: (() => {
+                    const row = rows.find(r => r.textContent.indexOf('原文#40#') >= 0);
+                    return !!row && row.childElementCount === 2
+                        && row.children[0].textContent === '原文#40#'
+                        && row.children[1].textContent === '译文#40#';
+                })(),
+            };
+        })()`);
+
+    check('历史容器节点数固定在上限内（不会随句数长大）',
+        hist.rowCount === 30, JSON.stringify({ n: hist.rowCount }));
+    check('★ 30 条之后再加条目一次 createElement 都没有（零分配、零 innerHTML 解析）',
+        hist.createdDuring === 0, String(hist.createdDuring));
+    check('只有写过的槽位可见（不会在面板里留一串空行）',
+        hist.visibleRows === 30, String(hist.visibleRows));
+    check('滚出窗口的旧条目确实被覆盖掉了（#10 已消失、#11 还在）',
+        hist.has40 && hist.has11 && hist.has10 === false && hist.has1 === false,
+        JSON.stringify({ has40: hist.has40, has11: hist.has11, has10: hist.has10, has1: hist.has1 }));
+    check('★ 最新的一条排在最上面（靠 CSS order，不搬 DOM 节点）',
+        hist.order40 !== null && hist.order39 !== null && hist.order40 < hist.order39,
+        JSON.stringify({ o40: hist.order40, o39: hist.order39 }));
+    check('原文与译文两行都在（历史上这句译文曾经丢失过）',
+        hist.bothLines === true, JSON.stringify(hist));
+    check('★ 走 textContent，标签会原样显示而不是被解析成 HTML',
+        hist.injected === true && hist.injectedText === '<b>x</b><i>y</i>'
+        && hist.injectedHtml.indexOf('&lt;b&gt;') >= 0
+        && hist.injectedHtml.indexOf('<b>') < 0,
+        JSON.stringify({ t: hist.injectedText, h: hist.injectedHtml }));
+
+    // ─────────────────────────────────────────────
+    S('12o. P1-1 frame 采样：跟随视频帧，但不多花钱');
+
+    const sampleCfg = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const sel = document.querySelector('#h1sub-sampleMode');
+            return {
+                def: H.DEFAULTS.sampleMode,
+                modes: H.SAMPLE_MODES,
+                bad: H.sanitizeCfg({ sampleMode: '乱填的' }).sampleMode,
+                ok: H.sanitizeCfg({ sampleMode: 'frame' }).sampleMode,
+                options: sel ? Array.from(sel.options).map(o => o.value) : null,
+            };
+        })()`);
+    check('sampleMode 默认是 interval（默认行为与历史完全一致）',
+        sampleCfg.def === 'interval', String(sampleCfg.def));
+    check('坏值兜回默认（否则 <select> 会显示空白、运行时却按别的模式跑）',
+        sampleCfg.bad === 'interval' && sampleCfg.ok === 'frame', JSON.stringify(sampleCfg));
+    check('面板上有采样方式下拉框，两个选项与常量一一对应',
+        Array.isArray(sampleCfg.options) && sampleCfg.options.join(',') === sampleCfg.modes.join(','),
+        JSON.stringify(sampleCfg));
+
+    const frameRun = await evAsync(`
+        (async () => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            const v = H.findVideo();
+            const bx = H.getContentBox(v);
+            const PA = window.__PATTERN__;
+            const saved = {
+                engine: H.CFG.engine, apiBase: H.CFG.apiBase, apiKey: H.CFG.apiKey,
+                smartSkip: H.CFG.smartSkip, region: H.CFG.region, sampleMode: H.CFG.sampleMode,
+                interval: H.CFG.interval,
+            };
+            H.CFG.region = {
+                x: bx.left,
+                y: bx.top + (PA.BAND_Y / v.videoHeight) * bx.height,
+                w: bx.width,
+                h: (PA.BAND_H / v.videoHeight) * bx.height,
+            };
+            H.CFG.engine = 'openai-vision';
+            H.CFG.apiBase = 'https://api.deepseek.com';
+            H.CFG.apiKey = 'sk-abc';
+            H.CFG.smartSkip = false;
+            H.CFG.interval = 1000;
+            window.__gmResponse = ${JSON.stringify(okResp('{"original":"SUBTITLE TEST 01","translation":"字幕测试 01"}'))};
+            window.__gmDelay = 0;
+
+            // ⚠️ 本套件跑的是无头 Chrome，而它**存在 rvfc 却从不回调**（已实测：
+            //    2000ms 里回调 0 次，同时 rAF 跑了 122 次）。所以这里装一个按 30fps 泵帧的
+            //    替身，走的是**同一段产品代码**（arm / cancel / 采样节流 / 看门狗），
+            //    只是帧源可预测。下面 B / C 两组反过来专门验证"帧回调不来"时的两条退路。
+            const realRvfc = v.requestVideoFrameCallback;
+            const realCancel = v.cancelVideoFrameCallback;
+            const pending = new Map();
+            let armed = 0, cancelled = 0, seq = 0;
+            v.requestVideoFrameCallback = function (cb) { const h = ++seq; pending.set(h, cb); armed++; return h; };
+            v.cancelVideoFrameCallback = function (h) { if (pending.delete(h)) cancelled++; };
+            const pump = setInterval(() => {
+                const list = Array.from(pending.values());
+                pending.clear();
+                for (const cb of list) cb(performance.now(), { presentedFrames: 1 });
+            }, 33);
+
+            // ---- A. 帧驱动：采样要密，付费调用不能密 ----
+            H.CFG.sampleMode = 'frame';
+            P.resetFrameState();
+            P.stats.samples = 0; P.stats.apiCalls = 0; P.stats.shots = 0; P.stats.skipNoChange = 0;
+            P.running = true;
+            const t0 = performance.now();
+            P.tick();
+            await sleep(3000);
+            const dt = performance.now() - t0;
+            const frame = {
+                samples: P.stats.samples, apiCalls: P.stats.apiCalls, shots: P.stats.shots,
+                skipNoChange: P.stats.skipNoChange, dt, armed,
+            };
+            P.stop();
+            await sleep(150);
+            frame.afterStopTimer = P.timer !== null;
+            frame.afterStopRvfc = P._rvfc !== null;
+            frame.rvfcIsReal = typeof realRvfc === 'function';
+
+            // 停止时的句柄必须被真的取消掉。上面的采样过程中回调都是"已经触发过"的句柄
+            // （单次句柄，触发即失效），所以这里专门挂一个**还没触发**的，再停止。
+            P.running = true;
+            P.scheduleNext(5000);
+            frame.pendingBeforeStop = P._rvfc !== null;
+            const cancelledBeforeStop = cancelled;
+            P.stop();
+            frame.cancelledOnStop = cancelled - cancelledBeforeStop;
+            frame.rvfcAfterStop = P._rvfc !== null;
+
+            // ---- B. 反证一：rvfc 这个 API 根本不存在 → 走 setTimeout 那条退路 ----
+            clearInterval(pump);
+            v.requestVideoFrameCallback = undefined;
+            P.resetFrameState();
+            P.stats.shots = 0; P.stats.samples = 0;
+            H.CFG.interval = 400;
+            P.running = true;
+            P.tick();
+            await sleep(1500);
+            const fallback = { shots: P.stats.shots, samples: P.stats.samples };
+            P.stop();
+
+            // ---- C. 反证二：rvfc 存在但**永远不回调**（无头 Chrome 就是这样）→
+            //      看门狗必须顶上来，节奏退化回固定间隔，主循环不能停摆
+            v.requestVideoFrameCallback = function () { return ++seq; };   // 记下句柄但从不回调
+            v.cancelVideoFrameCallback = function () {};
+            P.resetFrameState();
+            P.stats.shots = 0; P.stats.samples = 0;
+            P._rvfcFrameOK = false; P._rvfcMisses = 0;
+            let warned = false;
+            const origSetStatus = H.UI.setStatus;
+            H.UI.setStatus = function (msg, kind) {
+                if (/拿不到视频帧回调/.test(String(msg))) warned = true;
+                return origSetStatus.apply(this, arguments);
+            };
+            P.running = true;
+            P.tick();
+            await sleep(1600);
+            const dead = { shots: P.stats.shots, samples: P.stats.samples, warned, misses: P._rvfcMisses };
+            P.stop();
+            H.UI.setStatus = origSetStatus;
+
+            delete v.requestVideoFrameCallback;
+            delete v.cancelVideoFrameCallback;
+            v.requestVideoFrameCallback = realRvfc;
+            v.cancelVideoFrameCallback = realCancel;
+
+            Object.assign(H.CFG, saved);
+            P.running = false;
+            P.stop();
+            return { frame, fallback, dead };
+        })()`);
+
+    check('这台浏览器的 <video> 上有 requestVideoFrameCallback（接口存在）',
+        frameRun.frame.rvfcIsReal === true, JSON.stringify(frameRun));
+    check('★ frame 模式下确实按视频帧采样（3 秒内采样次数远多于固定间隔的 3 次）',
+        frameRun.frame.samples > 8, JSON.stringify(frameRun.frame));
+    check('frame 模式确实跑通了识别链路（不是只采样不干活）',
+        frameRun.frame.apiCalls >= 1 && frameRun.frame.shots > 8, JSON.stringify(frameRun.frame));
+    check('★ 付费调用没有变密：3 秒 / 间隔 1000ms 的调用数不超过 floor(dt/interval)+1',
+        frameRun.frame.apiCalls <= Math.floor(frameRun.frame.dt / 1000) + 1,
+        JSON.stringify(frameRun.frame));
+    check('重复画面仍然被"画面没变"挡在付费之外',
+        frameRun.frame.skipNoChange >= 1, JSON.stringify(frameRun.frame));
+    check('★ 挂着未触发的句柄时停止：会把它真正取消掉（不是只 arm 不 cancel）',
+        frameRun.frame.pendingBeforeStop === true && frameRun.frame.cancelledOnStop === 1
+        && frameRun.frame.rvfcAfterStop === false, JSON.stringify(frameRun.frame));
+    check('停止后 rvfc 句柄与定时器都清干净了（不会留下偷跑的回调）',
+        frameRun.frame.afterStopTimer === false && frameRun.frame.afterStopRvfc === false,
+        JSON.stringify(frameRun.frame));
+    check('★ 反证一：没有 rvfc 这个 API 时安静退回固定间隔，主循环不会停摆',
+        frameRun.fallback.shots >= 2 && frameRun.fallback.samples === 0,
+        JSON.stringify(frameRun.fallback));
+    check('★ 反证二：rvfc 存在却从不回调时，看门狗顶上来继续跑（不会静默停摆）',
+        frameRun.dead.shots >= 2 && frameRun.dead.samples === 0, JSON.stringify(frameRun.dead));
+    check('★ 这种降级会明说一次（用户不会以为自己走在更快的那条路上）',
+        frameRun.dead.warned === true && frameRun.dead.misses >= 3, JSON.stringify(frameRun.dead));
+
+    // ─────────────────────────────────────────────
+    S('12p. P2-2 共享源选错时给出提示（把静默失败变成可见警告）');
+
+    const mismatch = await ev(`
+        (() => {
+            const H = window.__H1SUB__;
+            const C = H.Capturer;
+            const w = window.innerWidth, h = window.innerHeight;
+            return {
+                fn: typeof C.displaySourceMismatch,
+                same: C.displaySourceMismatch({ width: w, height: h }),
+                scaled: C.displaySourceMismatch({ width: w * 2, height: h * 2 }),
+                other: C.displaySourceMismatch({ width: h, height: w }),
+                empty: C.displaySourceMismatch({}),
+                nil: C.displaySourceMismatch(null),
+                wh: [w, h],
+            };
+        })()`);
+    check('共享源自检是个可调用的纯函数', mismatch.fn === 'function', JSON.stringify(mismatch));
+    check('同一个标签页（即使分辨率不同）不报警',
+        mismatch.same === false && mismatch.scaled === false, JSON.stringify(mismatch));
+    check('★ 宽高比对不上（选成了别的窗口 / 整个屏幕）会报警',
+        mismatch.other === true, JSON.stringify(mismatch));
+    check('拿不到设置时安静放行（不误报）',
+        mismatch.empty === false && mismatch.nil === false, JSON.stringify(mismatch));
+
+    // ─────────────────────────────────────────────
+    S('12q. 复审发现的四个问题（回归断言）');
+
+    // 这四条都是"改完再自查"时被独立复审抓出来的：功能测试当时全绿，因为每一条都只在
+    // 特定组合下才现形（别的引擎 / 屏幕已空 / 状态栏被后面那句覆盖 / 取消后的窗口期）。
+    const review = await evAsync(`
+        (async () => {
+            const H = window.__H1SUB__;
+            const P = H.Pipeline;
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            const out = {};
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 640; canvas.height = 60;
+            const g = canvas.getContext('2d');
+            g.fillStyle = '#000'; g.fillRect(0, 0, 640, 60);
+            g.fillStyle = '#fff'; g.font = 'bold 44px sans-serif';
+            g.textBaseline = 'middle'; g.fillText('OCR 一行字', 10, 30);
+
+            // ---- ① 取消不能被引擎层包装成普通错误（否则停止被报成"出错"并进入退避）----
+            const abortedInFlight = async (fn, warmMs) => {
+                const scope = H.beginAbortScope();
+                const p = fn();
+                if (warmMs) await sleep(warmMs);     // 等请求真的发出去（有些路径先 await 节流）
+                H.abortActiveScope();
+                let r;
+                try { await p; r = { resolved: true }; }
+                catch (e) { r = { aborted: H.isAbortError(e), msg: String((e && e.message) || e) }; }
+                H.endAbortScope(scope);
+                return r;
+            };
+
+            H.CFG.engine = 'openai-vision';
+            window.__gmDelay = 3;
+            out.umi = await abortedInFlight(() => H.recognizeByUmi(canvas));
+            out.vision = await abortedInFlight(() => H.recognizeAndTranslate(canvas));
+
+            // web-translate：要等节流放行、请求真的在飞，才谈得上"取消"
+            H.CFG.wtMinInterval = 0;
+            H.CFG.srcLang = '日语';
+            H.CFG.tgtLang = '简体中文';
+            window.__gmDelay = 400;
+            const fail0 = H.wtStats.tencent ? H.wtStats.tencent.fail : 0;
+            out.wt = await abortedInFlight(() => H.wtTranslate('复审专用的一句独特台词、不要和别处重复'), 60);
+            out.wtFailAdded = (H.wtStats.tencent ? H.wtStats.tencent.fail : 0) - fail0;
+            window.__gmDelay = 3;
+
+            // ---- ② 取消之后新建的请求不该被"已取消的作用域"挡掉 ----
+            window.__gmResponse = { status: 200, text: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) };
+            const scope2 = H.beginAbortScope();
+            H.abortActiveScope();
+            try {
+                const r = await H.gmRequest({ url: 'https://example.com/x', data: '{}' });
+                out.afterAbort = (r && r.status === 200) ? 'sent' : ('status=' + (r && r.status));
+            } catch (e) { out.afterAbort = 'rejected:' + (H.isAbortError(e) ? 'aborted' : String(e && e.message)); }
+            H.endAbortScope(scope2);
+
+            // ---- ③ 屏幕已经空了以后，"重复帧"记录不能再吞掉字幕 ----
+            const mk = (text) => {
+                const c = document.createElement('canvas');
+                c.width = 640; c.height = 60;
+                const x = c.getContext('2d');
+                x.fillStyle = '#000'; x.fillRect(0, 0, 640, 60);
+                x.fillStyle = '#fff'; x.font = 'bold 44px sans-serif';
+                x.textBaseline = 'middle'; x.fillText(text, 10, 30);
+                return c;
+            };
+            const a = mk('AAAA'), b = mk('BBBB');
+            H.CFG.smartSkip = false;
+
+            // 屏幕上有那句 → 命中重复帧判据（这是它该有的行为，12m 已覆盖）
+            P.resetFrameState();
+            P.rememberShown('AAAA', '译文');
+            P.lastThumb = H.thumbnail(b);
+            P.lastSentThumb = H.thumbnail(b);
+            P.repeatThumbs = [H.thumbnail(a)];
+            const rep0 = P.stats.skipRepeat;
+            const skippedWithText = P.shouldSkipFrame(a);
+            const repAdded = P.stats.skipRepeat - rep0;
+
+            // 屏幕空了（连续无字幕 / 改字号颜色都会走到这）→ 同一帧必须放行
+            P.resetFrameState();
+            P.rememberShown('', '');
+            P.lastThumb = H.thumbnail(b);
+            P.lastSentThumb = H.thumbnail(b);
+            P.repeatThumbs = [H.thumbnail(a)];
+            const rep1 = P.stats.skipRepeat;
+            const skippedWhenEmpty = P.shouldSkipFrame(a);
+            const repAddedEmpty = P.stats.skipRepeat - rep1;
+
+            // 顺带确认"屏幕收掉时记录会被清掉"（present 的空结果分支）
+            P.resetFrameState();
+            P.rememberShown('AAAA', '译文');
+            P.repeatThumbs = [H.thumbnail(a)];
+            P.present({ original: '', translation: '', ms: 1 });
+            P.present({ original: '', translation: '', ms: 1 });
+            const clearedOnEmpty = P.repeatThumbs.length === 0;
+
+            H.CFG.smartSkip = true;
+            P.resetFrameState();
+            P.rememberShown('', '');
+
+            // ---- ④ 共享源比例不一致的警告必须留到"成功"状态之后 ----
+            const statusText = () => (H.UI.els.status ? H.UI.els.status.textContent : '');
+            const before = H.Capturer.displayMismatch;
+            H.Capturer.displayMismatch = true;
+            H.UI.applyCaptureMode('display', '✅ 标签页捕获已启动');
+            const warnText = statusText();
+            H.Capturer.displayMismatch = false;
+            H.UI.applyCaptureMode('display', '✅ 标签页捕获已启动');
+            const okText = statusText();
+            H.Capturer.displayMismatch = before;
+
+            return {
+                umi: out.umi, vision: out.vision, wt: out.wt, wtFailAdded: out.wtFailAdded,
+                afterAbort: out.afterAbort,
+                skippedWithText, repAdded, skippedWhenEmpty, repAddedEmpty, clearedOnEmpty,
+                warnText, okText,
+            };
+        })()`);
+
+    check('★ 取消 Umi-OCR 那条路：抛出来的仍是"取消"（不是被包装成"连不上 Umi-OCR"）',
+        review.umi.aborted === true, JSON.stringify(review.umi));
+    check('★ 取消视觉大模型那条路同样是"取消"',
+        review.vision.aborted === true, JSON.stringify(review.vision));
+    check('★ 取消 web-translate 那条路：不报"全部失败"、也不记成引擎失败',
+        review.wt.aborted === true && review.wtFailAdded === 0,
+        JSON.stringify({ wt: review.wt, failAdded: review.wtFailAdded }));
+    check('★ 取消之后新建的请求照常发出（不会被"已取消的作用域"连发都不发就拒掉）',
+        review.afterAbort === 'sent', String(review.afterAbort));
+    check('屏幕上还有那句时，重复帧判据照常生效（不是把这条判据整个关掉了）',
+        review.skippedWithText === true && review.repAdded === 1,
+        JSON.stringify({ skip: review.skippedWithText, added: review.repAdded }));
+    check('★ 屏幕空了之后，同一帧必须放行（否则字幕会静默缺失）',
+        review.skippedWhenEmpty === false && review.repAddedEmpty === 0,
+        JSON.stringify({ skip: review.skippedWhenEmpty, added: review.repAddedEmpty }));
+    check('屏幕收掉时"重复帧"记录会被清空（不留过期结论）',
+        review.clearedOnEmpty === true, String(review.clearedOnEmpty));
+    check('★ 共享源比例不一致时，警告留到最后（不会被"标签页捕获已启动"覆盖掉）',
+        /比例不一致/.test(review.warnText), review.warnText);
+    check('比例正常时只报成功（不误报）',
+        /标签页捕获已启动/.test(review.okText) && !/比例不一致/.test(review.okText),
+        review.okText);
 
     // ─────────────────────────────────────────────
     // destroy() 会把面板整个拆掉、els 清空，所以必须放在最后

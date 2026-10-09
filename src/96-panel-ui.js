@@ -16,7 +16,7 @@
     //              baiPair、baiProbe、baiPrepare、baiReset、baiBrowser、baiVersionNote、
     //              langCode、wtSelftest、wtReset、uiHost、
     //              Capturer、Pipeline、Overlay、Diag、Fullscreen、RegionSelector、
-    //              openModal、setHTML、escapeHtml、STATUS_COLORS、panelHTML、panelCSS、
+    //              openModal、setHTML、STATUS_COLORS、panelHTML、panelCSS、
     //              banCurrentHost、cache
     // ═══════════════════════════════════════════════════════════════
     //
@@ -61,7 +61,7 @@
                 'webtranslate', 'wtEngine', 'wtMinInterval', 'wt-test', 'wt-status',
                 'umionly', 'umiBase', 'umiLang', 'umi-test', 'umi-status',
                 'captureMode', 'sharescreen', 'stopscreen', 'capture-hint',
-                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
+                'srcLang', 'tgtLang', 'interval', 'sampleMode', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
                 'fontSize', 'fontVal', 'bgOpacity', 'opacityVal', 'offsetY', 'offsetVal',
                 'textColor', 'outline', 'showOriginal', 'overlayTop',
                 'extraPrompt', 'thinkingMode', 'thinking-hint', 'maxTokens',
@@ -489,6 +489,7 @@
             bindInput('srcLang', e.srcLang);
             bindInput('tgtLang', e.tgtLang);
             bindInput('interval', e.interval, Number);
+            bindInput('sampleMode', e.sampleMode);
             bindInput('extraPrompt', e.extraPrompt);
             bindInput('thinkingMode', e.thinkingMode);
             bindInput('maxTokens', e.maxTokens, Number);
@@ -637,14 +638,23 @@
             window.addEventListener('resize', this._onResize);
         },
 
-        /** 切换截图方式并同步相关 UI。「申请共享授权」「停止共享」「画布被污染自动切换」
-         *  三处的写配置 → 落盘 → 刷新控件 → 刷新提示是同一段流程，收在这里。 */
+        /**
+         * 切换截图方式并同步相关 UI。「申请共享授权」「停止共享」「画布被污染自动切换」
+         * 三处的写配置 → 落盘 → 刷新控件 → 刷新提示是同一段流程，收在这里。
+         *
+         * 共享源自检（`Capturer.displayMismatch`）也在这里收口：三个调用点都会紧跟着写一条
+         * "成功"状态，所以警告只能**在成功状态之后**发，否则会被覆盖掉、用户永远看不到。
+         */
         applyCaptureMode(mode, statusMsg, statusKind) {
             CFG.captureMode = mode;
             saveCfgKeys(CFG, ['captureMode']);
             this.loadToUI();
             this.syncCaptureUI();
             if (statusMsg) this.setStatus(statusMsg, statusKind || 'ok');
+            if (mode === 'display' && Capturer.displayMismatch) {
+                this.setStatus('⚠️ 共享画面与本标签页的比例不一致 —— 可能选到了「整个屏幕」或别的'
+                    + '窗口，字幕区域会对不上。请点「停止共享」后重新授权，在弹窗里选「此标签页」', 'warn');
+            }
         },
 
         syncCaptureUI() {
@@ -1105,6 +1115,7 @@
             e.srcLang.value = CFG.srcLang;
             e.tgtLang.value = CFG.tgtLang;
             e.interval.value = CFG.interval;
+            e.sampleMode.value = CFG.sampleMode || 'interval';
             e.smartSkip.checked = !!CFG.smartSkip;
             e.pauseWhenHidden.checked = !!CFG.pauseWhenHidden;
             e.sim.value = CFG.textSimThreshold;
@@ -1218,17 +1229,46 @@
             }
         },
 
+        /**
+         * 往「最近识别」里加一条。
+         *
+         * ⚡ 优化：原来是每句都 createElement + innerHTML 解析 + insertBefore + 删尾节点。
+         *   现在预建 HIST_MAX 个节点循环复用，只改 textContent，显示顺序交给 CSS 的 order
+         *   （容器在 90-panel-html.js 里是 flex 列）—— 零分配、零 HTML 解析、零节点搬移。
+         *   没写到过的槽位用 display:none 藏起来，不会在面板里留一串空行。
+         */
         pushHistory(o, t) {
             const el = this.els.hist;
             if (!el) return;
-            const div = document.createElement('div');
-            div.style.cssText = 'padding:4px 0;border-bottom:1px solid #23272f';
-            // 注意：原来是把译文那段拼到 setHTML 的返回值上（返回值被丢弃），历史记录里一直只有原文
-            setHTML(div,
-                '<div style="color:#6b7280">' + escapeHtml(o) + '</div>'
-                + '<div style="color:#e6e8ee">' + escapeHtml(t) + '</div>');
-            el.insertBefore(div, el.firstChild);
-            while (el.childElementCount > HIST_MAX) el.removeChild(el.lastChild);
+            if (!this._histRows || this._histOwner !== el) this._initHistory(el);
+            const rows = this._histRows;
+            const seq = ++this._histSeq;
+            const row = rows[(seq - 1) % HIST_MAX];
+            row.o.textContent = String(o == null ? '' : o);
+            row.t.textContent = String(t == null ? '' : t);
+            // 最新的排最上面：flex 列里 order 越小越靠前，所以用负的序号
+            row.el.style.order = String(-seq);
+            row.el.style.display = 'block';
+        },
+
+        /** 预建 HIST_MAX 行（每行 = 外层 div + 原文 div + 译文 div），只做一次 */
+        _initHistory(el) {
+            const rows = [];
+            for (let i = 0; i < HIST_MAX; i++) {
+                const div = document.createElement('div');
+                div.style.cssText = 'padding:4px 0;border-bottom:1px solid #23272f;display:none';
+                const o = document.createElement('div');
+                o.style.color = '#6b7280';
+                const t = document.createElement('div');
+                t.style.color = '#e6e8ee';
+                div.appendChild(o);
+                div.appendChild(t);
+                el.appendChild(div);
+                rows.push({ el: div, o, t });
+            }
+            this._histRows = rows;
+            this._histOwner = el;
+            this._histSeq = 0;
         },
 
         async testApi() {

@@ -217,6 +217,12 @@
 
             '  <div class="h1sub-sec">节奏</div>',
             '  <label>截图间隔(ms)<input id="h1sub-interval" type="number" min="300" step="100"></label>',
+            '  <label>采样方式',
+            '    <select id="h1sub-sampleMode">',
+            '      <option value="interval">固定间隔（默认，最省）</option>',
+            '      <option value="frame">跟随视频帧（更快发现新字幕，同一间隔内不多花钱）</option>',
+            '    </select>',
+            '  </label>',
             '  <label style="flex-direction:row;align-items:center;gap:6px">',
             '    <input id="h1sub-smartSkip" type="checkbox" style="width:auto"> 无文字时跳过调用（省 API 费用）',
             '  </label>',
@@ -284,7 +290,10 @@
             '  <div id="h1sub-stats" style="color:#5c6478;margin-top:4px"></div>',
 
             '  <div class="h1sub-sec">最近识别</div>',
-            '  <div id="h1sub-hist" style="color:#9aa3b8;max-height:120px;overflow:auto"></div>',
+            // flex + order：历史条目复用固定的节点，靠 order 决定谁在最上面（见 UI.pushHistory），
+            // 不再每句都 createElement + innerHTML 解析 + insertBefore
+            '  <div id="h1sub-hist" style="color:#9aa3b8;max-height:120px;overflow:auto;'
+            + 'display:flex;flex-direction:column"></div>',
             '</div>',
         ].join('\n');
     }

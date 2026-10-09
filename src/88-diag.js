@@ -8,7 +8,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.13.1';
+    const SCRIPT_VERSION = '1.14.0';
 
     const Diag = {
         modal: null,

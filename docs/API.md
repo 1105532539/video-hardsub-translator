@@ -473,8 +473,8 @@ H.version;              // '1.12.0'
 
 | 成员 | 说明 |
 | --- | --- |
-| `Pipeline` | 主循环。`start()` / `stop()` / `toggle()` / `step()` / `invalidate()`；状态见 `running` `busy` `gen` `stats` `lastThumb` `lastOriginal` |
-| `Capturer` | 截图器。`grab(region, video)` / `grabFromElement()` / `grabFromDisplay()` / `crop()` / `startDisplayCapture()` / `stopDisplayCapture()`；状态见 `mode` `displayStream` |
+| `Pipeline` | 主循环。`start()` / `stop()` / `toggle()` / `step()` / `invalidate()` / `resetFrameState()` / `resetStats()` / `scheduleNext()` / `watchVideoFrames()`；状态见 `running` `busy` `gen` `stats` `lastThumb` `lastSentThumb` `repeatThumbs` `lastOriginal` `nextDue` `nextSample` |
+| `Capturer` | 截图器。`grab(region, video)` / `grabFromElement()` / `grabFromDisplay()` / `crop()` / `startDisplayCapture()` / `stopDisplayCapture()` / `displaySourceMismatch(settings)`；状态见 `mode` `displayStream` |
 | `Overlay` | 字幕悬浮层。`show(original, translation)` / `clear()` / `position()` / `reposition()` |
 | `UI` | 控制面板。`mount()` / `destroy()` / `setStatus()` / `loadToUI()` / `syncRegion()` / `pushHistory()` 等 |
 | `RegionSelector` | 框选器。`begin()`；状态见 `active` |
@@ -487,7 +487,8 @@ H.version;              // '1.12.0'
 | 函数 | 签名 | 说明 |
 | --- | --- | --- |
 | `thumbnail` | `(canvas) → Float32Array` | 32×16 灰度缩略图，**每次返回新数组**（调用方会长期持有） |
-| `thumbDiff` | `(a, b) → number` | 两缩略图的平均绝对差（0~1） |
+| `thumbDiff` | `(a, b) → number` | 两缩略图的平均绝对差（0~1），"变化大不大" |
+| `thumbClose` | `(a, b) → boolean` | 两缩略图是不是**就是同一张图**（均值差 `< 0.0015` 且单点最大差 `≤ 6`），用于"重复帧不再购买" |
 | `edgeDensity` | `(canvas) → number` | 160×48 边缘密度（0~1） |
 | `textSimilarity` | `(a, b) → number` | 归一化编辑距离相似度（0~1） |
 | `parseModelJson` | `(txt) → object\|null` | 容错解析模型返回的 JSON |
@@ -515,7 +516,13 @@ H.version;              // '1.12.0'
 | --- | --- | --- |
 | `recognizeAndTranslate(canvas, opts?)` | `async → {original, translation}` | **统一入口**，按 `CFG.engine` 分发；`opts.onDelta(累计译文, 原文)` 供流式显示 |
 | `translateByVision(dataUrl)` | `async → {original, translation}` | 视觉大模型（一步） |
-| `translateText(text)` | `async → string` | 纯文本翻译（带 LRU 缓存） |
+| `translateText(text)` | `async → string` | 纯文本翻译。**顺序是"先判重、再付钱"**：与屏幕上那句相同/相似就直接返回屏幕上的译文，不发请求；否则查 LRU 缓存，最后才调接口 |
+| `setShown(o, t)` / `getShown()` | `→ void` / `→ {original, translation}` | 「此刻显示在屏幕上的一句」。`Pipeline.lastOriginal` / `lastTranslation` 就是转发到它 —— 引擎层要在付钱前读同一份，两份状态各写各的迟早会漂移 |
+| `dedupeStats` | `{prePayHits}` | 免付费判重的命中次数 |
+| `gmRequest(opts)` | `async → {status, responseText}` | `GM_xmlhttpRequest` 的 Promise 封装。当前有取消作用域时会被登记，作用域取消时一并中断（`opts` 同前：`method` / `url` / `headers` / `data` / `timeout`） |
+| `beginAbortScope()` / `endAbortScope(scope)` | `→ scope` / `→ void` | 建立 / 关闭一个取消作用域（`Pipeline.recognize()` 内部使用） |
+| `abortActiveScope()` | `→ void` | 取消当前作用域内全部在飞请求。`invalidate()` 会调用它 |
+| `isAbortError(e)` | `→ boolean` | 这个错误是不是"我们自己取消的"（`e.aborted`）。**取消不是失败**，不该弹错误、不该退避 |
 | `recognizeByUmi(canvas)` | `async → {original, translation}` | Umi-OCR 识别 + 大模型翻译 |
 | `callUmiOCR(dataUrl)` | `async → string` | 仅调 Umi-OCR |
 | `umiProbe()` | `async → object` | 探测 Umi-OCR（面板「测试连接」） |
@@ -634,12 +641,22 @@ interface Region {
 
 ```ts
 interface Stats {
-    shots: number;      // 截图轮数
-    apiCalls: number;   // 实际发生的 API 调用次数
-    skipped: number;    // 被跳过判定拦下的轮数
-    errors: number;     // 异常次数
+    shots: number;          // 截图轮数（含 frame 模式下的每次便宜采样）
+    apiCalls: number;       // 实际发生的 API 调用次数
+    skipped: number;        // 被跳过判定拦下的轮数（下面三项之和）
+    errors: number;         // 异常次数（**不含**主动取消）
+    samples: number;        // frame 采样模式下"看一眼画面"的次数（interval 模式恒为 0）
+    skipNoChange: number;   // ↑ 其中：画面没变
+    skipNoText: number;     // ↑ 其中：区域里没有文字
+    skipRepeat: number;     // ↑ 其中：这一帧上次买回来已被判为重复句
 }
 ```
+
+形状集中在 `Pipeline.resetStats()` 里定义 —— 别在别处手写这个字面量，加了新字段
+一定会漏（v1.14.0 加计数时就踩过一次）。
+
+免付费判重的命中次数单独记在 `dedupeStats.prePayHits`（`window.__H1SUB__.dedupeStats`）：
+本机 OCR 认出文字后、**在调付费接口之前**发现"和屏幕上那句是同一句"的次数。
 
 ### 3.3 诊断记录 `Diag`
 

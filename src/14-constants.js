@@ -1,11 +1,11 @@
     // ═══════════════════════════════════════════════════════════════
     //  14-constants.js — 热路径常量与配色
     //
-    //  截图循环默认每 1.2 秒走一遍（`CFG.interval`；出错退避、切到后台、
-    //  视频暂停时会变慢或停下），魔数集中在这里便于调参。
+    //  对标「截图节奏」的常量都在这儿：默认每 1.2 秒扫一遍（`CFG.interval`；出错退避、
+    //  切到后台、视频暂停时会变慢或停下），frame 采样模式下另有一个更密的「看一眼」节奏。
     //
     //  对外提供：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD、EDGE_MIN、
-    //              NO_CHANGE_DIFF、STATUS_COLORS
+    //              NO_CHANGE_DIFF、FRAME_SAMPLE_MS、STATUS_COLORS
     //  依赖：无
     // ═══════════════════════════════════════════════════════════════
     const THUMB_W = 32, THUMB_H = 16;   // 「画面是否变化」缩略图尺寸
@@ -13,6 +13,10 @@
     const EDGE_GRAD = 45;               // 相邻像素灰度差超过此值记作一条边
     const EDGE_MIN = 0.035;             // 边缘密度低于此值视为「无文字」，跳过 API
     const NO_CHANGE_DIFF = 0.004;       // 缩略图平均差低于此值视为「画面没变」
+    // frame 采样模式（CFG.sampleMode = 'frame'）下「看一眼画面」的最小间隔。
+    // 这一步只做截图 + 缩略图比对（实测约 0.45ms），所以能跑得比付费间隔密得多；
+    // 它的作用是把「字幕出现 → 被发现」从最多一个 CFG.interval 压到最多 200ms。
+    const FRAME_SAMPLE_MS = 200;
 
     /** 状态栏配色（setStatus 的 kind → 颜色） */
     const STATUS_COLORS = {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网页视频硬字幕实时翻译（OCR + 第三方大模型 API）
 // @namespace    https://github.com/1105532539/video-hardsub-translator
-// @version      1.13.1
+// @version      1.14.0
 // @description  任意网站通用：框选视频硬字幕区域，定时截图后由 OCR / 视觉大模型识别，再翻译成中文并以悬浮字幕盖回画面。五种引擎可选，其中两种不需要 API Key
 // @author       1105532539
 // @license      GPL-3.0-or-later
@@ -86,11 +86,25 @@
  *    · 画面没变 —— 用 32×16 灰度缩略图比对；同一张图**只买一次**，
  *      无论它识别出来的是文字还是空。
  *    · 区域里没文字 —— 用 160×48 边缘密度判断，字幕不在时不调接口。
- *    · 和上一句太像 —— 相似度去重，避免字幕抖动导致的重复翻译。
+ *    · 和上一句太像 —— 先说清楚：这条在**付钱之前**判。本机识别（Umi-OCR /
+ *      端侧模型）认出文字后如果和屏幕上那句是同一句，直接复用屏幕上的译文，
+ *      这一轮一次接口都不调；纯图片引擎（视觉大模型 / 有道）没法先知道文字，
+ *      退一步的做法是记住"买回来又被判为重复"的那一帧，下次遇到同一帧不再买。
+ *    · 点「停止」/ 换区域 / 切到后台 —— **真的中断在飞请求**，不是只丢弃结果。
+ *      否则服务端会把那段你已经不需要的回复生成完，token 照扣。
  *    · 切到后台标签页 —— 自动暂停。视频在后台**仍会继续播放**，
  *      不暂停就是花钱翻译没人看得到的结果（可在面板关掉）。
  *    · 出错按类型退避 —— 限流指数退避（封顶 60s）；而 Key / 地址 /
  *      模型名填错这类问题会直接停下来提示你改，不会一直盲目重试。
+ *
+ *  ⏱ 采样方式（面板「节奏」区，默认固定间隔）：
+ *    · 固定间隔：每 N 毫秒看一次画面（默认 1200ms），行为与历史版本一致。
+ *    · 跟随视频帧：每个视频新帧都便宜地比一下画面（截图 + 缩略图，约 0.45ms），
+ *      于是字幕一出现最多 200ms 就被发现；而**两次付费调用之间仍至少隔一个
+ *      「截图间隔」**，所以不会更费钱。实测（`npm run bench:sample`）字幕
+ *      「出现 → 被发现」的中位数从 0.4~0.8 秒降到约 80ms，最坏从约 1.2 秒
+ *      （= 截图间隔本身）降到 0.2 秒左右，而付费调用次数完全相同。
+ *      拿不到视频帧回调的环境会自动退回固定间隔。
  *
  *  它会在哪些页面上出现（@match 已放开到所有网址，但不会到处乱挂）：
  *    · 页面上有 ≥200×120 的视频      → 右下角留一个小胶囊，点开才是完整面板
@@ -151,7 +165,7 @@
     //  因为全量写一次要动 30+ 个存储项。
     //
     //  对外提供：NS、DEFAULTS、ENGINES、BAI_OCR_CHOICES、BAI_TRANS_CHOICES、
-    //              WT_ENGINE_CHOICES、
+    //              WT_ENGINE_CHOICES、SAMPLE_MODES、
     //              NUM_RANGES、API_PRESETS、DS_VISION_MODELS、
     //              NO_VISION_MODELS、VISION_MARKERS、CFG、cloneDefault、loadCfg、
     //              sanitizeCfg、saveCfg、saveCfgKeys、isNoVisionModel、
@@ -215,7 +229,14 @@
         tgtLang: '简体中文',
 
         // ---- 截图与节奏 ----
-        interval: 1200,                         // 截图间隔(ms)
+        interval: 1200,                         // 截图间隔(ms)，同时也是两次付费调用之间的最小间隔
+        // 采样方式：
+        //   interval = 固定间隔轮询（默认，与历史行为完全一致）
+        //   frame    = 跟随视频帧：每来一个新画面帧都便宜地比一下（截图 + 缩略图，约 0.45ms），
+        //              但**两次付费调用之间仍然至少隔 interval**，所以不会更费钱，
+        //              只是把「字幕出现 → 被发现」从最多一个 interval 压到最多 200ms。
+        //              不支持 requestVideoFrameCallback 的环境会自动退回 interval。
+        sampleMode: 'interval',
         region: null,                           // 框选区域（页面坐标）
         regionHost: null,                       // 上面这个 region 是在哪个网站框的
         regionsByHost: {},                      // 按网站分别记住框选区域 { hostname: region }
@@ -277,6 +298,9 @@
     const BAI_OCR_CHOICES = ['umi', 'builtin'];
     const BAI_TRANS_CHOICES = ['auto', 'translator', 'prompt'];
 
+    // 采样方式，和面板上的 <option> 一一对应
+    const SAMPLE_MODES = ['interval', 'frame'];
+
     // 数值型配置的合法区间（和面板控件的 min/max 一致）
     const NUM_RANGES = {
         fontSize: [12, 48],
@@ -310,6 +334,8 @@
             ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
         cfg.panelOpen = cfg.panelOpen === undefined ? DEFAULTS.panelOpen : !!cfg.panelOpen;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
+        // 采样方式同样是下拉框取值：坏值会让 <select> 显示空白，运行时却按别的模式跑
+        if (SAMPLE_MODES.indexOf(cfg.sampleMode) < 0) cfg.sampleMode = DEFAULTS.sampleMode;
 
         for (const k in NUM_RANGES) {
             const r = NUM_RANGES[k];
@@ -499,11 +525,11 @@
     // ═══════════════════════════════════════════════════════════════
     //  14-constants.js — 热路径常量与配色
     //
-    //  截图循环默认每 1.2 秒走一遍（`CFG.interval`；出错退避、切到后台、
-    //  视频暂停时会变慢或停下），魔数集中在这里便于调参。
+    //  对标「截图节奏」的常量都在这儿：默认每 1.2 秒扫一遍（`CFG.interval`；出错退避、
+    //  切到后台、视频暂停时会变慢或停下），frame 采样模式下另有一个更密的「看一眼」节奏。
     //
     //  对外提供：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD、EDGE_MIN、
-    //              NO_CHANGE_DIFF、STATUS_COLORS
+    //              NO_CHANGE_DIFF、FRAME_SAMPLE_MS、STATUS_COLORS
     //  依赖：无
     // ═══════════════════════════════════════════════════════════════
     const THUMB_W = 32, THUMB_H = 16;   // 「画面是否变化」缩略图尺寸
@@ -511,6 +537,10 @@
     const EDGE_GRAD = 45;               // 相邻像素灰度差超过此值记作一条边
     const EDGE_MIN = 0.035;             // 边缘密度低于此值视为「无文字」，跳过 API
     const NO_CHANGE_DIFF = 0.004;       // 缩略图平均差低于此值视为「画面没变」
+    // frame 采样模式（CFG.sampleMode = 'frame'）下「看一眼画面」的最小间隔。
+    // 这一步只做截图 + 缩略图比对（实测约 0.45ms），所以能跑得比付费间隔密得多；
+    // 它的作用是把「字幕出现 → 被发现」从最多一个 CFG.interval 压到最多 200ms。
+    const FRAME_SAMPLE_MS = 200;
 
     /** 状态栏配色（setStatus 的 kind → 颜色） */
     const STATUS_COLORS = {
@@ -760,7 +790,7 @@
     //    这句是不是和上一句重复（textSimilarity）
     //  离屏画布与 DP 滚动行缓冲都复用，不每轮新建。
     //
-    //  对外提供：thumbnail、thumbDiff、edgeDensity、textSimilarity
+    //  对外提供：thumbnail、thumbDiff、thumbClose、edgeDensity、textSimilarity
     //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD
     // ═══════════════════════════════════════════════════════════════
     /**
@@ -800,6 +830,25 @@
         let s = 0;
         for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
         return s / a.length / 255;
+    }
+
+    /**
+     * 两张缩略图是不是「就是同一张图」。比 thumbDiff 严格得多（那个是"变化不大"）：
+     * 均值差 < 0.0015 **且** 单点最大差 ≤ 6（灰度 0~255）。
+     *
+     * 用途只有一个：「上一帧买回来的答案因为与上句重复被丢弃了，下次遇到同一帧别再买」。
+     * 容差必须卡紧 —— 宽松一点就会把「换了句台词」的画面认成旧帧，结果是静默显示上一句
+     * 的译文，正是本项目最忌讳的那种错。
+     */
+    function thumbClose(a, b) {
+        if (!a || !b || a.length !== b.length) return false;
+        let sum = 0, max = 0;
+        for (let i = 0; i < a.length; i++) {
+            const d = Math.abs(a[i] - b[i]);
+            sum += d;
+            if (d > max) max = d;
+        }
+        return max <= 6 && sum / a.length / 255 < 0.0015;
     }
 
     /**
@@ -1000,24 +1049,115 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  40-http.js — HTTP：用 GM_xmlhttpRequest 绕过 CORS
+    //  40-http.js — HTTP：用 GM_xmlhttpRequest 绕过 CORS，并且**可以被取消**
     //
-    //  对外提供：gmRequest
+    //  发请求之外，这里还管「止损」：主循环每发起一轮识别就开一个**取消作用域**，
+    //  这期间创建的请求都登记在里面；用户点停止 / 换区域 / 切到后台时把这些请求真正
+    //  abort 掉。以前只靠 gen 计数器丢弃迟到的结果 —— 结果是不画到屏幕上了，但请求
+    //  还在服务端跑完，那段 token（默认上限 1024）照样计费。
+    //
+    //  对外提供：gmRequest、beginAbortScope、endAbortScope、abortActiveScope、
+    //              isAbortError、abortError
     //  依赖：无
     // ═══════════════════════════════════════════════════════════════
+    /** 主动取消请求时抛出的错误。带 aborted 标记，主循环据此「不当成失败」。 */
+    function abortError() {
+        const e = new Error('请求已取消（结果已经不需要了，停止计费）');
+        e.aborted = true;
+        return e;
+    }
+
+    /** 这个错误是不是「我们自己取消的」（而不是网络/配置问题） */
+    function isAbortError(e) { return !!(e && e.aborted); }
+
+    /**
+     * 当前生效的取消作用域。用「一进一出」的方式标记这段时间内创建的请求：
+     * 主循环在调引擎之前 beginAbortScope()，调用结束后 endAbortScope()。
+     * 这是有意为之的简化 —— 不做参数穿透（那要改 5 个引擎和它们各自的调用链，漏一处
+     * 就少一条取消路径）。代价是：**同一瞬间**由别的入口（手动截一帧、诊断、测试连接）
+     * 创建的请求也会被登记进来；这些入口都是一次性的人工操作，最坏结果是它跟着报一句
+     * 「请求已取消」，不会静默算错，也不会误改配置。
+     */
+    let ACTIVE_SCOPE = null;
+
+    /** 开一个取消作用域；句柄交给 endAbortScope() / abortActiveScope() */
+    function beginAbortScope() {
+        const scope = { aborted: false, reqs: new Set(), prev: ACTIVE_SCOPE };
+        ACTIVE_SCOPE = scope;
+        return scope;
+    }
+
+    /** 正常走完，关掉作用域（嵌套调用时只关自己那一层，外层原样恢复） */
+    function endAbortScope(scope) {
+        if (scope && scope.reqs) scope.reqs.clear();
+        if (ACTIVE_SCOPE === scope) ACTIVE_SCOPE = scope.prev || null;
+    }
+
+    /** 取消当前作用域里所有在飞请求（停止 / 换区域 / 切后台 / 换页时调） */
+    function abortActiveScope() {
+        const s = ACTIVE_SCOPE;
+        if (!s) return;
+        // ⚠️ 先把作用域摘掉，再取消：被取消的那一轮还要走一段收尾（异常向上传播、
+        //    finally 释放），这期间别的入口（测试连接 / 手动截一帧 / 诊断）如果发出请求，
+        //    会因为「作用域已取消」而连发都不发就报失败 —— 那不是它们该承受的。
+        ACTIVE_SCOPE = s.prev || null;
+        if (s.aborted) return;
+        s.aborted = true;
+        // 先复制再遍历：rec.abort() 会同步走 finish() → 从集合里删元素，
+        // 直接遍历 Set 会漏掉后面的项。
+        for (const rec of Array.from(s.reqs)) rec.abort();
+        s.reqs.clear();
+    }
+
+    /**
+     * 发一个 GM 请求；当前有取消作用域时会被登记进去，作用域取消时一并中断。
+     *
+     * abort() 里主动把 Promise 结算掉：GM_xmlhttpRequest 的返回值**并非**所有管理器
+     * 都会回调 onabort（Tampermonkey 会，其它实现不一），只依赖 onabort 的话
+     * Promise 有可能永远悬着，主循环就一直卡在 busy 上。
+     */
     function gmRequest(opts) {
+        const scope = ACTIVE_SCOPE;
+        // 作用域已经取消了：连请求都不用发出去
+        if (scope && scope.aborted) return Promise.reject(abortError());
+
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: opts.method || 'POST',
-                url: opts.url,
-                headers: opts.headers || {},
-                data: opts.data,
-                timeout: opts.timeout || 45000,
-                responseType: 'text',
-                onload: (r) => resolve(r),
-                onerror: () => reject(new Error('网络请求失败（检查地址/代理）')),
-                ontimeout: () => reject(new Error('请求超时')),
-            });
+            let settled = false;
+            let handle = null;
+
+            const finish = (fail, value) => {
+                if (settled) return;
+                settled = true;
+                if (scope) scope.reqs.delete(rec);
+                if (fail) reject(value); else resolve(value);
+            };
+
+            const rec = {
+                abort() {
+                    try { handle && handle.abort && handle.abort(); } catch (e) { /* 已经结束了 */ }
+                    finish(true, abortError());
+                },
+            };
+
+            try {
+                handle = GM_xmlhttpRequest({
+                    method: opts.method || 'POST',
+                    url: opts.url,
+                    headers: opts.headers || {},
+                    data: opts.data,
+                    timeout: opts.timeout || 45000,
+                    responseType: 'text',
+                    onload: (r) => finish(false, r),
+                    onerror: () => finish(true, new Error('网络请求失败（检查地址/代理）')),
+                    ontimeout: () => finish(true, new Error('请求超时')),
+                    onabort: () => finish(true, abortError()),
+                });
+            } catch (e) {
+                // 管理器同步抛错（地址非法等）：当场结算，不要留下悬着的 Promise
+                finish(true, e instanceof Error ? e : new Error(String(e)));
+                return;
+            }
+            if (scope) scope.reqs.add(rec);
         });
     }
 
@@ -1168,7 +1308,7 @@
     //
     //  对外提供：UMI_LANGS、umiBase、umiNiceError、callUmiOCR、umiProbe、
     //              recognizeByUmi
-    //  依赖：CFG、gmRequest、stripDataUrlPrefix、canvasToJpeg、translateText
+    //  依赖：CFG、gmRequest、isAbortError、stripDataUrlPrefix、canvasToJpeg、translateText
     // ═══════════════════════════════════════════════════════════════
     /** Umi-OCR 的语言选项 → 引擎配置文件 */
     const UMI_LANGS = [
@@ -1218,6 +1358,10 @@
                 timeout: 30000,
             });
         } catch (e) {
+            // ⚠️ 主动取消（停止 / 换区域 / 切后台）必须先原样抛出去：底下那句包装会造一个
+            //    全新的 Error，把 aborted 标记丢掉 —— 主循环就认不出这是"取消"，
+            //    于是把停止当成"连不上 Umi-OCR"报红字并进入退避。
+            if (isAbortError(e)) throw e;
             throw new Error(umiNiceError(e));
         }
 
@@ -1255,6 +1399,7 @@
                 timeout: 8000,
             });
         } catch (e) {
+            if (isAbortError(e)) throw e;      // 同 callUmiOCR：取消不能被包装成"连不上"
             throw new Error(umiNiceError(e));
         }
         if (r.status < 200 || r.status >= 300) {
@@ -2181,7 +2326,7 @@
     //
     //  对外提供：WT_ENGINES、WT_DEFAULT_ORDER、wtStats、wtReset、wtOrder、
     //              wtLangPair、wtTranslate、wtSelftest、recognizeByWebTranslate
-    //  依赖：CFG、WT_ENGINE_CHOICES、gmRequest、canvasToJpeg、callUmiOCR、
+    //  依赖：CFG、WT_ENGINE_CHOICES、gmRequest、isAbortError、canvasToJpeg、callUmiOCR、
     //              cacheGet、cachePut、sleep、langCode、stripWrappingQuotes、
     //              log、warn、Diag
     // ═══════════════════════════════════════════════════════════════
@@ -2392,6 +2537,10 @@
                 cachePut(key, res);
                 return res;
             } catch (e) {
+                // ⚠️ 主动取消不是"这家引擎挂了"：它是整个请求被我们自己取消，
+                //    继续往下试只会再撞两次"已取消"、把统计记成失败、最后抛出一句
+                //    像是接口挂了的话 —— 主循环也就认不出这是取消（会报红字 + 退避）。
+                if (isAbortError(e)) throw e;
                 wtStat(id, false);
                 wtStats[id].lastError = String((e && e.message) || e);
                 warn('免费接口 ' + id + ' 失败：', e);
@@ -2534,10 +2683,21 @@
             this.displayVideo = v;
             this.mode = 'display';
 
+            // 选错共享源（整个屏幕 / 另一个窗口）是一类**静默**失败：坐标基准是
+            // window.innerWidth/innerHeight，源一变，区域就整体错位 —— 脚本会稳定地截到
+            // 无关像素、OCR 出一堆乱字、钱照扣，而且不报错。这里做一个廉价的自检。
+            // ⚠️ 结论只记在实例上，**不在这里写状态栏**：调用方（UI.applyCaptureMode /
+            //    Pipeline.handleTainted）随后都会写一条"成功"状态，直接写会被覆盖掉，
+            //    用户永远看不到（这正是这个自检存在的意义）。
+            const settings = stream.getVideoTracks()[0].getSettings
+                ? (stream.getVideoTracks()[0].getSettings() || {}) : {};
+            this.displayMismatch = this.displaySourceMismatch(settings);
+
             stream.getVideoTracks()[0].addEventListener('ended', () => {
                 warn('屏幕共享已结束，切回 element 模式');
                 this.displayStream = null;
                 this.displayVideo = null;
+                this.displayMismatch = false;
                 this.mode = 'element';
                 UI.setStatus('共享已结束，已切回直接读取模式', 'warn');
             });
@@ -2582,6 +2742,21 @@
             return this._out;
         },
 
+        /**
+         * 共享源和本标签页「看起来不是同一个」吗？只比**宽高比**：
+         * 分辨率会因 DPR / 系统缩放而不同（那是正常的，grabFromDisplay 会按比例换算），
+         * 宽高比对不上才是真的选错了源。12% 的容差很保守 —— 16:9 与 16:10 只差 11%。
+         * 纯提示：不改任何行为，只是把一类静默失败变成看得见的警告。
+         */
+        displaySourceMismatch(settings) {
+            const w = Number(settings && settings.width) || 0;
+            const h = Number(settings && settings.height) || 0;
+            const ww = window.innerWidth, wh = window.innerHeight;
+            if (!w || !h || !ww || !wh) return false;
+            const src = w / h, win = ww / wh;
+            return Math.abs(src - win) / win > 0.12;
+        },
+
         grabFromDisplay(region) {
             const v = this.displayVideo;
             if (!v || !v.videoWidth) return null;
@@ -2623,11 +2798,34 @@
     //
     //  对外提供：cache、CACHE_MAX、cacheGet、cachePut、apiUrl、apiHeaders、
     //              shouldDisableThinking、buildChatBody、extractContent、
-    //              callChatCore、callChat
+    //              callChatCore、callChat、setShown、getShown、getShownOriginal、
+    //              getShownTranslation、dedupeStats
     //  依赖：CFG、gmRequest
     // ═══════════════════════════════════════════════════════════════
     const cache = new Map();          // 原文 -> 译文
     const CACHE_MAX = 500;
+
+    /**
+     * 「此刻显示在屏幕上的那一句」。由主循环在显示 / 清空字幕时写入（Pipeline.rememberShown）。
+     *
+     * 存在的理由：识别是免费的（本机 Umi-OCR / 端侧模型），**翻译才是要花钱的那一步**。
+     * 只有先把这句话和屏幕上的比一下，才能在付钱之前就发现「又是同一句」。
+     * 以前这道判断只在 present() 里做 —— 那时接口已经调过了，钱照扣、结果照丢。
+     */
+    let shownOriginal = '';
+    let shownTranslation = '';
+
+    function setShown(o, t) {
+        shownOriginal = String(o == null ? '' : o);
+        shownTranslation = String(t == null ? '' : t);
+    }
+
+    function getShown() { return { original: shownOriginal, translation: shownTranslation }; }
+    function getShownOriginal() { return shownOriginal; }
+    function getShownTranslation() { return shownTranslation; }
+
+    /** 免付费判重命中次数（诊断 / 测试用：证明「先判重」这条真的在省调用） */
+    const dedupeStats = { prePayHits: 0 };
 
     /** 取缓存。Map 迭代顺序 = 插入顺序，所以「命中后删掉再塞回去」等于把这条挪到队尾，淘汰时丢的永远是
      *  最久没用过的那条（原来是纯先进先出：一句反复出现的台词，中间插进 500 条新字幕就会被挤掉重翻）。 */
@@ -2769,7 +2967,8 @@
     //  对外提供：translateByVision、translateText、recognizeAndTranslate
     //  依赖：CFG、callChat、buildChatBody、parseModelJson、stripWrappingQuotes、
     //              cacheGet、cachePut、canvasToJpeg、callYoudaoImage、
-    //              recognizeByUmi、recognizeByBrowserAI、recognizeByWebTranslate
+    //              recognizeByUmi、recognizeByBrowserAI、recognizeByWebTranslate、
+    //              getShown、textSimilarity、dedupeStats
     // ═══════════════════════════════════════════════════════════════
     /** vision 模式：截图直接丢给视觉大模型，一步出结果。 */
     async function translateByVision(dataUrl) {
@@ -2812,6 +3011,19 @@
     async function translateText(original) {
         const text = String(original || '').trim();
         if (!text) return '';
+
+        // ⚡ 先判重、再付钱：能走到这里，说明识别已经完成了（本机 Umi-OCR / 端侧模型，不花钱），
+        //    而下面这一步是按次计费的。这句如果和屏幕上正在显示的那句是同一句，就直接复用
+        //    屏幕上的译文 —— 可见结果一模一样，但这一轮一次请求都不发。
+        //    以前这道判断只在 present() 里做，那时钱已经花掉了，只是把结果丢掉。
+        //    要求 shown.translation 非空：否则"上一句本来就没译文"时会返回空串，
+        //    被 present() 判成「只认出原文、没拿到译文」而弹警告。
+        const shown = getShown();
+        if (shown.original && shown.translation
+            && textSimilarity(text, shown.original) > (1 - CFG.textSimThreshold)) {
+            dedupeStats.prePayHits++;
+            return shown.translation;
+        }
 
         // 用 has 而不是真值判断：模型偶尔会返回空内容，空字符串是 falsy，用 `if (hit)` 的话这种
         // 缓存永远命中不了，同一句会被反复送到付费接口去重翻。
@@ -2868,13 +3080,27 @@
     //
     //  对外提供：Pipeline
     //  依赖：CFG、Capturer、UI、Overlay、Diag、recognizeAndTranslate、thumbnail、
-    //              thumbDiff、edgeDensity、textSimilarity、classifyError、findVideo、
-    //              log、warn、NO_CHANGE_DIFF、EDGE_MIN
+    //              thumbDiff、thumbClose、edgeDensity、textSimilarity、classifyError、findVideo、
+    //              log、warn、NO_CHANGE_DIFF、EDGE_MIN、FRAME_SAMPLE_MS、
+    //              beginAbortScope、endAbortScope、abortActiveScope、isAbortError、
+    //              setShown、getShownOriginal、getShownTranslation
     // ═══════════════════════════════════════════════════════════════
     const Pipeline = {
         running: false,
         busy: false,
         timer: null,
+        // frame 采样模式下的两个时刻：下一次**允许花钱**的识别（nextDue，由 CFG.interval /
+        // 退避时长推进）与下一次**允许看一眼画面**（nextSample，便宜，按视频帧率）。
+        // 两者分开，才能在不多花钱的前提下把探测延迟压到一帧。
+        nextDue: 0,
+        nextSample: 0,
+        // requestVideoFrameCallback 的句柄与它所属的 video（取消时要成对使用）
+        _rvfc: null,
+        _rvfcVideo: null,
+        // 这个页面的视频帧回调到底会不会来：一直不来就说明"帧驱动"名存实亡（已实测：
+        // 无头 Chrome 的合成视频流就是这样），此时看门狗接管，行为等价于固定间隔模式。
+        _rvfcFrameOK: false,
+        _rvfcMisses: 0,
         // 每次 start / stop / 换区域都 +1；异步结果回来时对不上就说明这次识别已作废，直接丢掉。
         gen: 0,
         lastThumb: null,
@@ -2887,24 +3113,63 @@
         // 跳过的判据用 lastSentThumb，才能覆盖「画面静止但识别不出文字」的情况：
         // 那种情况下 lastOriginal 恒为空，用它会让同一张图被反复送去付费识别（见 P0-1）。
         lastSentThumb: null,
-        lastOriginal: '',
-        lastTranslation: '',
+        // ⚠️ 这里**不要**再写 lastOriginal / lastTranslation 两个数据属性：
+        //    下面有一对同名访问器（转发到 60-chat.js 的 shown 存储），对象字面量里
+        //    后写的定义生效，所以数据属性会被静默盖掉 —— 一旦有人调换顺序就会破功。
         emptyStreak: 0,
         // 后台标签页暂停期间为 true；用来区分「用户按了停止」和「只是切走了」
         hiddenPaused: false,
         // 连续失败次数，用于指数退避（成功一次即清零）
         failStreak: 0,
-        stats: { shots: 0, apiCalls: 0, skipped: 0, errors: 0 },
+        // 「买回来又被判为重复句」的那几帧的指纹。这些帧的答案本来就会被 present() 丢掉，
+        // 所以下次遇到同一帧（逐像素级接近）就不必再买一次（见 P2-1c）。
+        // 一有新句子显示出来就清空 —— 那时的"重复"结论已经过期。
+        repeatThumbs: [],
+        // 跳过原因分开计数：以前只有一个总数，看不出「钱漏在哪条路上」（见 P2-1c 的前置条件）
+        stats: { shots: 0, apiCalls: 0, skipped: 0, errors: 0, samples: 0,
+            skipNoChange: 0, skipNoText: 0, skipRepeat: 0 },
 
-        invalidate() { this.gen++; },
+        // 「上一句」只存一份，就在 60-chat.js 的 shown 状态里 —— 引擎层（translateText）
+        // 要靠它做「先判重、再付钱」。这里用访问器转发而不是各存一份：两份状态迟早会不一致，
+        // 后果不是"该省的钱没省"，就是"该显示的句子被当成重复句吞掉"。
+        get lastOriginal() { return getShownOriginal(); },
+        set lastOriginal(v) { setShown(v, getShownTranslation()); },
+        get lastTranslation() { return getShownTranslation(); },
+        set lastTranslation(v) { setShown(getShownOriginal(), v); },
+
+        /** 一次写两个（显示 / 清空字幕时用），避免中间出现"新原文配旧译文"的瞬间 */
+        rememberShown(original, translation) {
+            setShown(original || '', translation || '');
+        },
+
+        /** 把统计清零。**统计对象的形状只在这里定义一次** —— 别处手写一份字面量一定会
+         *  漏掉后加的字段（v1.14.0 加按原因计数的跳过项时就踩过这个坑）。 */
+        resetStats() {
+            this.stats = { shots: 0, apiCalls: 0, skipped: 0, errors: 0, samples: 0,
+                skipNoChange: 0, skipNoText: 0, skipRepeat: 0 };
+        },
+
+        /** 采样模式：只有开启了 frame，并且当前视频支持 requestVideoFrameCallback，才走帧驱动 */
+        frameMode() {
+            if ((CFG.sampleMode || 'interval') !== 'frame') return false;
+            const v = this._rvfcVideo && this._rvfcVideo.isConnected ? this._rvfcVideo : findVideo();
+            return !!(v && typeof v.requestVideoFrameCallback === 'function');
+        },
+
+        invalidate() {
+            this.gen++;
+            // 作废在飞结果的同时**真正取消在飞请求**：结果反正要丢掉，再让服务端把
+            // 那 1024 个 token 生成完就是白花钱（见 P1-3）。
+            abortActiveScope();
+        },
 
         /** 把「与上一帧有关」的状态一次清干净：换区域 / SPA 跳页 / 改配置后都该调它。
          *  以前这段是手工复制在 4 个调用点上的，容易漏（漏了会把新句当成重复句吞掉）。 */
         resetFrameState() {
             this.lastThumb = null;
             this.lastSentThumb = null;
-            this.lastOriginal = '';
-            this.lastTranslation = '';
+            this.repeatThumbs = [];
+            this.rememberShown('', '');
             this.emptyStreak = 0;
             this.invalidate();
         },
@@ -2918,6 +3183,12 @@
             this.invalidate();
             this.running = true;
             this.lastThumb = null;
+            this.repeatThumbs = [];
+            this.nextDue = 0;
+            this.nextSample = 0;
+            // 重新开始就重新判断这个页面会不会给视频帧回调 —— 上一次可能是另一个 video 元素
+            this._rvfcFrameOK = false;
+            this._rvfcMisses = 0;
             this.emptyStreak = 0;
             this.failStreak = 0;      // 重开就重置退避，别继承上一次的惩罚
             UI.setRunning(true);
@@ -2929,6 +3200,7 @@
             this.running = false;
             this.invalidate();
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            this.cancelFrameWatch();
             // 清 busy：否则在飞请求返回前（最长一次 GM 超时）重新点「开始」会被
             // ensureReady 里的 busy 判断静默吞掉，表现成"点了没反应"。
             // 安全性由 gen 保证 —— 迟到的结果对不上代，本来就会被丢弃。
@@ -2936,8 +3208,8 @@
             // 停止要收掉字幕：不然最后一句一直挂着，用户以为还在翻译（换集 / 暂停时尤其容易误会）。
             // 「上一句」也得清 —— 否则重开后与停之前相同的首句会被当成重复句直接吞掉。
             Overlay.clear();
-            this.lastOriginal = '';
-            this.lastTranslation = '';
+            this.rememberShown('', '');
+            this.repeatThumbs = [];
             // ⚠️ lastSentThumb 必须跟着一起清：它标记的是"这一帧已经买过了"，
             // 而上面刚把结果（lastOriginal / lastTranslation）丢掉。若保留它，
             // 重开后遇到静止画面会被判成"已买过"而跳过 —— 结果就是既不识别、
@@ -2959,8 +3231,9 @@
         pauseForHidden() {
             if (!this.running || this.hiddenPaused) return;
             this.hiddenPaused = true;
-            this.invalidate();                 // 作废在飞结果
+            this.invalidate();                 // 作废在飞结果，并取消在飞请求
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            this.cancelFrameWatch();
             UI.setStatus('已切到后台，暂停翻译（切回本标签页自动继续）', 'idle');
         },
 
@@ -2988,56 +3261,183 @@
         async tick() {
             if (!this.running || this.hiddenPaused) return;
             if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+            this.cancelFrameWatch();
 
+            const t0 = performance.now();
             let wait = Math.max(300, CFG.interval);
+            let attempted = false;
+            let failed = false;
             try {
-                await this.step();
+                attempted = await this.step();
                 this.failStreak = 0;              // 这一轮没抛错 → 退避清零
             } catch (e) {
-                this.stats.errors++;
-                this.failStreak++;
-                warn('step 出错：', e);
-                Diag.lastError = {
-                    time: new Date().toLocaleTimeString(),
-                    msg: String(e && e.message || e),
-                    stack: e && e.stack ? String(e.stack).split('\n').slice(0, 3).join('\n') : '',
-                };
-                const kind = classifyError(e);
-                if (kind === 'config') {
-                    // 模型名 / 地址 / Key 写错这类问题，重试永远好不了：停下来让用户去改
-                    UI.setStatus('出错：' + e.message, 'err');
-                    UI.setStatus('配置有问题，已自动停止：' + e.message, 'err');
-                    this.stop();
-                    return;
+                // 主动取消（停止 / 换区域 / 切后台）不是错误：不报错、不退避、不计错误数。
+                // 控制流仍要落到下面的排期上，否则一次取消会让主循环停摆。
+                if (!isAbortError(e)) {
+                    failed = true;
+                    this.stats.errors++;
+                    this.failStreak++;
+                    warn('step 出错：', e);
+                    Diag.lastError = {
+                        time: new Date().toLocaleTimeString(),
+                        msg: String(e && e.message || e),
+                        stack: e && e.stack ? String(e.stack).split('\n').slice(0, 3).join('\n') : '',
+                    };
+                    const kind = classifyError(e);
+                    if (kind === 'config') {
+                        // 模型名 / 地址 / Key 写错这类问题，重试永远好不了：停下来让用户去改
+                        UI.setStatus('出错：' + e.message, 'err');
+                        UI.setStatus('配置有问题，已自动停止：' + e.message, 'err');
+                        this.stop();
+                        return;
+                    }
+                    const ms = this.backoffDelay(e);
+                    wait = Math.max(wait, ms);
+                    UI.setStatus('出错（' + (kind === 'ratelimit' ? '被限流' : kind === 'quota' ? '额度不足' : '请求失败')
+                        + '），' + Math.round(ms / 1000) + 's 后重试：' + e.message, 'err');
                 }
-                const ms = this.backoffDelay(e);
-                wait = Math.max(wait, ms);
-                UI.setStatus('出错（' + (kind === 'ratelimit' ? '被限流' : kind === 'quota' ? '额度不足' : '请求失败')
-                    + '），' + Math.round(ms / 1000) + 's 后重试：' + e.message, 'err');
             }
 
             if (this.running && !this.hiddenPaused) {
-                this.timer = setTimeout(() => this.tick(), wait);
+                // frame 模式下，最小间隔从**这一轮开始**算起（interval 模式是这一轮结束才起算），
+                // 于是周期从 interval + 接口耗时 变成 max(interval, 接口耗时)：
+                // 慢模型上省掉一整个往返的等待，而**两次付费调用之间仍然至少隔 interval**，
+                // 所以花钱的上限没有变（见 P1-1）。
+                // 只有"真的调了接口"或"刚失败要退避"才推进 nextDue —— 纯看画面的那些轮次
+                // 不该占用额度，否则字幕出现后还要再干等一个 interval。
+                if (this.frameMode() && (attempted || failed)) this.nextDue = t0 + wait;
+                this.scheduleNext(wait);
             }
         },
 
-        /** 跑一轮：看看画面 → 该跳过就跳过 → 调引擎 → 显示译文；细节在各自的具名方法里 */
+        /**
+         * 排下一轮。
+         *   interval 模式（默认）：和以前一样 setTimeout 固定间隔 —— 行为与历史完全一致。
+         *   frame 模式：交给 scheduleNext 的帧驱动分支 —— 每个视频新帧看一眼画面，
+         *   但只有"画面真的变了、而且距上次付费已经够久"才会走到识别（见 watchVideoFrames）。
+         */
+        scheduleNext(wait) {
+            if ((CFG.sampleMode || 'interval') === 'frame') {
+                const video = findVideo();
+                if (video && typeof video.requestVideoFrameCallback === 'function') {
+                    this.watchVideoFrames(video, wait);
+                    return;
+                }
+                // 环境不支持（旧 Firefox 等）→ 安静地退回固定间隔，不报错
+            }
+            this.timer = setTimeout(() => this.tick(), wait);
+        },
+
+        /**
+         * frame 驱动的采样：等视频的下一帧。
+         *
+         * 为什么这样能既快又不贵：
+         *   · 便宜的部分（截图 + 缩略图比对，实测约 0.45ms）按 FRAME_SAMPLE_MS 的节奏跑，
+         *     字幕一出现在画面上，最多 200ms 就被发现 —— 不再是"最多等一个 interval"；
+         *   · 贵的部分（付费接口）仍然被 nextDue 挡住：两次付费调用之间至少隔 CFG.interval，
+         *     所以单位时间的调用次数**不会比 interval 模式多**。
+         *   · 视频暂停 / 后台标签页里 rvfc 不再触发，主循环自然停住；恢复播放自动继续。
+         *
+         * 兜底看门狗（很重要）：rvfc 有可能**存在但永远不回调** —— 已实测的例子是无头
+         * Chrome 的合成视频流（回调数 0，而 rAF 2000ms 里跑了 122 次）。所以看门狗设成
+         * 和固定间隔一样的节奏：rvfc 正常时它每来一帧都被重置、永远轮不到；rvfc 不回调时
+         * 它就顶上来，行为**退化回 interval 模式**。于是 frame 模式最坏也只是和默认一样快慢，
+         * 不会更慢。（降级会连发 3 次看门狗后提示一次，不让用户以为自己走在更快的那条路上。）
+         */
+        watchVideoFrames(video, wait) {
+            this.cancelFrameWatch();
+            if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+
+            const rearm = () => { if (this.running && !this.hiddenPaused) this.watchVideoFrames(video, wait); };
+            const onFrame = () => {
+                this._rvfc = null;
+                this._rvfcVideo = null;
+                this._rvfcFrameOK = true;
+                this._rvfcMisses = 0;
+                if (!this.running || this.hiddenPaused) return;
+                const now = performance.now();
+                // 上一轮还没回来，或离上一次采样还不够久：再等一帧
+                if (this.busy || now < this.nextSample) { rearm(); return; }
+                this.nextSample = now + FRAME_SAMPLE_MS;
+                this.stats.samples++;
+                this.tick();
+            };
+
+            try {
+                this._rvfc = video.requestVideoFrameCallback(onFrame);
+                this._rvfcVideo = video;
+            } catch (e) {
+                // 不支持 / 已经失效：退回定时器，别把循环卡死
+                this._rvfc = null;
+                this._rvfcVideo = null;
+                this.timer = setTimeout(() => this.tick(), Math.max(300, wait));
+                return;
+            }
+
+            this.timer = setTimeout(() => {
+                if (!this.running || this.hiddenPaused) { this.timer = null; return; }
+                this.cancelFrameWatch();
+                if (!this._rvfcFrameOK) {
+                    this._rvfcMisses = (this._rvfcMisses || 0) + 1;
+                    if (this._rvfcMisses === 3) {
+                        warn('视频帧回调一直没触发，已按固定间隔采样');
+                        UI.setStatus('这个页面拿不到视频帧回调，已按固定间隔采样（效果不受影响）', 'warn');
+                    }
+                }
+                this.tick();
+            }, Math.max(300, wait));
+        },
+
+        /** 取消挂着的 requestVideoFrameCallback（句柄必须和它所属的元素成对使用） */
+        cancelFrameWatch() {
+            const h = this._rvfc, v = this._rvfcVideo;
+            this._rvfc = null;
+            this._rvfcVideo = null;
+            if (h === null || !v || typeof v.cancelVideoFrameCallback !== 'function') return;
+            try { v.cancelVideoFrameCallback(h); } catch (e) { /* 已经触发过了 */ }
+        },
+
+        /** 跑一轮：看看画面 → 该跳过就跳过 → 调引擎 → 显示译文；细节在各自的具名方法里。
+         *  @returns {Promise<boolean>} 这一轮有没有**真的调用付费接口**（frame 模式用它推进最小间隔） */
         async step() {
             const myGen = this.gen;
 
             const video = findVideo();
-            if (!this.ensureReady(video)) return;
+            if (!this.ensureReady(video)) return false;
 
             const canvas = await this.grabFrame(video);
-            if (!canvas) return;
+            if (!canvas) return false;
 
             this.stats.shots++;
-            if (this.shouldSkipFrame(canvas)) return;
+            if (this.shouldSkipFrame(canvas)) return false;
 
-            const res = await this.recognize(canvas, myGen);
-            if (!res) return;              // 结果已作废（停止 / 换了区域 / 页面跳走）
+            // 画面确实变了，但离上一次付费还不够久（只有 frame 模式会走到这里）：
+            // 先不花钱，等最小间隔到点再来看 —— 那时画面若又变了，用的是新的一帧。
+            if (this.frameMode() && performance.now() < this.nextDue) {
+                UI.setStatus('画面有变化，等待最小间隔…', 'idle');
+                return false;
+            }
+
+            const res = await this.stepRecognize(canvas, myGen);
+            if (!res) return true;         // 结果已作废，但请求确实发出去过 → 仍然占用最小间隔
 
             this.present(res);
+            return true;
+        },
+
+        /**
+         * 调引擎，并把「我们自己取消的请求」收在这里 —— 取消不是失败：
+         * 不往上抛（否则 tick 会把它当成一次错误去退避、弹红字），但这一轮确实已经把
+         * 请求发出去了，所以返回值照旧让调用方推进最小间隔。
+         */
+        async stepRecognize(canvas, myGen) {
+            try {
+                return await this.recognize(canvas, myGen);
+            } catch (e) {
+                if (isAbortError(e)) { log('已取消在飞请求（停止 / 换区域 / 切后台）'); }
+                else throw e;
+            }
+            return null;
         },
 
         /** 前置检查：有没有视频、有没有框选、能不能截、上一轮回来没有；true = 可以继续这一轮 */
@@ -3132,11 +3532,28 @@
             // 同一张图只买一次，无论买回来的答案是什么。
             if (noChange && this.lastSentThumb) {
                 this.stats.skipped++;
+                this.stats.skipNoChange++;
                 UI.setStatus('画面未变化，跳过', 'idle');
                 return true;
             }
             this.lastThumb = thumb;
             UI.setPreview(canvas);
+
+            // ---- 上次买回来又被判为重复句的那一帧，别再买第二次 ----
+            // present() 里判「与上句相似」时，钱已经花掉了。把那一帧的指纹记下来，
+            // 下次遇到同一帧（几乎逐像素相同）就直接跳过 —— 反正答案还是会被丢掉。
+            // 容差卡得很紧（均值 0.0015 / 单点 6），只认"真的就是同一张图"，
+            // 避免把换了一句话的帧误认成旧帧（那会静默显示上一句的译文）。
+            // ⚠️ 必须要求 `lastOriginal` 非空：那些记录的意思只是"这帧和**屏幕上那句**重复"，
+            //    屏幕已经空了（连续无字幕 / 改了字号颜色）时它就不再成立 ——
+            //    否则同一句字幕重新出现时会被这条判据吞掉，用户看到的是空字幕。
+            if (this.lastOriginal && this.lastSentThumb && this.repeatThumbs.length
+                && this.repeatThumbs.some(t => thumbClose(thumb, t))) {
+                this.stats.skipped++;
+                this.stats.skipRepeat++;
+                UI.setStatus('与上句相同，跳过（不再重复调用）', 'idle');
+                return true;
+            }
 
             // ---- 智能跳过：区域里没有文字就不调 API ----
             if (CFG.smartSkip) {
@@ -3144,10 +3561,13 @@
                 UI.setEdge(ed);
                 if (ed < EDGE_MIN) {
                     this.stats.skipped++;
+                    this.stats.skipNoText++;
                     this.emptyStreak++;
                     if (this.emptyStreak >= 2) {
                         Overlay.clear();
-                        this.lastOriginal = '';
+                        this.rememberShown('', this.lastTranslation);
+                        // 屏幕收掉了 → 那些"和屏幕这句重复"的记录也跟着失效（见上面的判据）
+                        this.repeatThumbs = [];
                     }
                     // 这里也更新 lastSentThumb：这一帧（含它的边缘特征）已经判过，
                     // 就算它后来变得"像有文字"，也得等画面真的变化才会重判。
@@ -3168,6 +3588,9 @@
             this.busy = true;
             UI.setStatus('识别中…', 'busy');
             const t0 = performance.now();
+            // 开一个取消作用域：这一轮里发出的所有请求都会被登记，停止 / 换区域 / 切后台
+            // 时被真正 abort 掉（见 40-http.js 与 P1-3）。
+            const scope = beginAbortScope();
             let res;
             try {
                 this.stats.apiCalls++;
@@ -3178,6 +3601,7 @@
                 this.lastSentThumb = null;
                 throw e;
             } finally {
+                endAbortScope(scope);
                 this.busy = false;
             }
 
@@ -3217,6 +3641,14 @@
             };
         },
 
+        /** 记下「这一帧的答案因为与上句太像被丢弃了」。下次遇到同一帧就不必再买一次。 */
+        rememberRepeatThumb() {
+            if (!this.lastSentThumb) return;
+            const list = this.repeatThumbs || (this.repeatThumbs = []);
+            list.unshift(this.lastSentThumb);
+            if (list.length > 4) list.length = 4;
+        },
+
         present(res) {
             const dt = res.ms;
 
@@ -3225,8 +3657,8 @@
                 this.emptyStreak++;
                 if (this.emptyStreak >= 2) {
                     Overlay.clear();
-                    this.lastOriginal = '';
-                    this.lastTranslation = '';
+                    this.rememberShown('', '');
+                    this.repeatThumbs = [];   // 屏幕空了 → "和屏幕这句重复"的记录全部失效
                 }
                 UI.setStatus('本帧无字幕（' + dt + 'ms）', 'idle');
                 return;
@@ -3243,13 +3675,16 @@
             // ③ 文本相似度阈值：和上一句太像就不刷新，避免字幕抖动
             const sim = textSimilarity(res.original || res.translation, this.lastOriginal);
             if (this.lastOriginal && sim > (1 - CFG.textSimThreshold)) {
+                // 这一帧的钱已经花掉了，答案却被丢掉；把指纹记下来，下次同一帧直接跳过
+                this.rememberRepeatThumb();
                 UI.setStatus('与上句相似，保持（' + dt + 'ms）', 'idle');
                 return;
             }
 
             // ④ 正常显示
-            this.lastOriginal = res.original || res.translation;
-            this.lastTranslation = res.translation;
+            this.rememberShown(res.original || res.translation, res.translation);
+            // 屏幕上的句子换了 → 之前那些「重复」结论全部过期
+            this.repeatThumbs = [];
             Overlay.show(res.original, res.translation);
             UI.pushHistory(res.original, res.translation);
             Diag.record({
@@ -3801,7 +4236,7 @@
     //              shouldDisableThinking、baiSupport、baiPair、baiBrokenPairs、
     //              baiPairKey、baiMayPivot、baiBrowser、wtOrder、wtStats、isTopFrame
     // ═══════════════════════════════════════════════════════════════
-    const SCRIPT_VERSION = '1.13.1';
+    const SCRIPT_VERSION = '1.14.0';
 
     const Diag = {
         modal: null,
@@ -4351,6 +4786,12 @@
 
             '  <div class="h1sub-sec">节奏</div>',
             '  <label>截图间隔(ms)<input id="h1sub-interval" type="number" min="300" step="100"></label>',
+            '  <label>采样方式',
+            '    <select id="h1sub-sampleMode">',
+            '      <option value="interval">固定间隔（默认，最省）</option>',
+            '      <option value="frame">跟随视频帧（更快发现新字幕，同一间隔内不多花钱）</option>',
+            '    </select>',
+            '  </label>',
             '  <label style="flex-direction:row;align-items:center;gap:6px">',
             '    <input id="h1sub-smartSkip" type="checkbox" style="width:auto"> 无文字时跳过调用（省 API 费用）',
             '  </label>',
@@ -4418,7 +4859,10 @@
             '  <div id="h1sub-stats" style="color:#5c6478;margin-top:4px"></div>',
 
             '  <div class="h1sub-sec">最近识别</div>',
-            '  <div id="h1sub-hist" style="color:#9aa3b8;max-height:120px;overflow:auto"></div>',
+            // flex + order：历史条目复用固定的节点，靠 order 决定谁在最上面（见 UI.pushHistory），
+            // 不再每句都 createElement + innerHTML 解析 + insertBefore
+            '  <div id="h1sub-hist" style="color:#9aa3b8;max-height:120px;overflow:auto;'
+            + 'display:flex;flex-direction:column"></div>',
             '</div>',
         ].join('\n');
     }
@@ -4531,7 +4975,7 @@
     //              baiPair、baiProbe、baiPrepare、baiReset、baiBrowser、baiVersionNote、
     //              langCode、wtSelftest、wtReset、uiHost、
     //              Capturer、Pipeline、Overlay、Diag、Fullscreen、RegionSelector、
-    //              openModal、setHTML、escapeHtml、STATUS_COLORS、panelHTML、panelCSS、
+    //              openModal、setHTML、STATUS_COLORS、panelHTML、panelCSS、
     //              banCurrentHost、cache
     // ═══════════════════════════════════════════════════════════════
     //
@@ -4576,7 +5020,7 @@
                 'webtranslate', 'wtEngine', 'wtMinInterval', 'wt-test', 'wt-status',
                 'umionly', 'umiBase', 'umiLang', 'umi-test', 'umi-status',
                 'captureMode', 'sharescreen', 'stopscreen', 'capture-hint',
-                'srcLang', 'tgtLang', 'interval', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
+                'srcLang', 'tgtLang', 'interval', 'sampleMode', 'smartSkip', 'pauseWhenHidden', 'sim', 'simVal',
                 'fontSize', 'fontVal', 'bgOpacity', 'opacityVal', 'offsetY', 'offsetVal',
                 'textColor', 'outline', 'showOriginal', 'overlayTop',
                 'extraPrompt', 'thinkingMode', 'thinking-hint', 'maxTokens',
@@ -5004,6 +5448,7 @@
             bindInput('srcLang', e.srcLang);
             bindInput('tgtLang', e.tgtLang);
             bindInput('interval', e.interval, Number);
+            bindInput('sampleMode', e.sampleMode);
             bindInput('extraPrompt', e.extraPrompt);
             bindInput('thinkingMode', e.thinkingMode);
             bindInput('maxTokens', e.maxTokens, Number);
@@ -5152,14 +5597,23 @@
             window.addEventListener('resize', this._onResize);
         },
 
-        /** 切换截图方式并同步相关 UI。「申请共享授权」「停止共享」「画布被污染自动切换」
-         *  三处的写配置 → 落盘 → 刷新控件 → 刷新提示是同一段流程，收在这里。 */
+        /**
+         * 切换截图方式并同步相关 UI。「申请共享授权」「停止共享」「画布被污染自动切换」
+         * 三处的写配置 → 落盘 → 刷新控件 → 刷新提示是同一段流程，收在这里。
+         *
+         * 共享源自检（`Capturer.displayMismatch`）也在这里收口：三个调用点都会紧跟着写一条
+         * "成功"状态，所以警告只能**在成功状态之后**发，否则会被覆盖掉、用户永远看不到。
+         */
         applyCaptureMode(mode, statusMsg, statusKind) {
             CFG.captureMode = mode;
             saveCfgKeys(CFG, ['captureMode']);
             this.loadToUI();
             this.syncCaptureUI();
             if (statusMsg) this.setStatus(statusMsg, statusKind || 'ok');
+            if (mode === 'display' && Capturer.displayMismatch) {
+                this.setStatus('⚠️ 共享画面与本标签页的比例不一致 —— 可能选到了「整个屏幕」或别的'
+                    + '窗口，字幕区域会对不上。请点「停止共享」后重新授权，在弹窗里选「此标签页」', 'warn');
+            }
         },
 
         syncCaptureUI() {
@@ -5620,6 +6074,7 @@
             e.srcLang.value = CFG.srcLang;
             e.tgtLang.value = CFG.tgtLang;
             e.interval.value = CFG.interval;
+            e.sampleMode.value = CFG.sampleMode || 'interval';
             e.smartSkip.checked = !!CFG.smartSkip;
             e.pauseWhenHidden.checked = !!CFG.pauseWhenHidden;
             e.sim.value = CFG.textSimThreshold;
@@ -5733,17 +6188,46 @@
             }
         },
 
+        /**
+         * 往「最近识别」里加一条。
+         *
+         * ⚡ 优化：原来是每句都 createElement + innerHTML 解析 + insertBefore + 删尾节点。
+         *   现在预建 HIST_MAX 个节点循环复用，只改 textContent，显示顺序交给 CSS 的 order
+         *   （容器在 90-panel-html.js 里是 flex 列）—— 零分配、零 HTML 解析、零节点搬移。
+         *   没写到过的槽位用 display:none 藏起来，不会在面板里留一串空行。
+         */
         pushHistory(o, t) {
             const el = this.els.hist;
             if (!el) return;
-            const div = document.createElement('div');
-            div.style.cssText = 'padding:4px 0;border-bottom:1px solid #23272f';
-            // 注意：原来是把译文那段拼到 setHTML 的返回值上（返回值被丢弃），历史记录里一直只有原文
-            setHTML(div,
-                '<div style="color:#6b7280">' + escapeHtml(o) + '</div>'
-                + '<div style="color:#e6e8ee">' + escapeHtml(t) + '</div>');
-            el.insertBefore(div, el.firstChild);
-            while (el.childElementCount > HIST_MAX) el.removeChild(el.lastChild);
+            if (!this._histRows || this._histOwner !== el) this._initHistory(el);
+            const rows = this._histRows;
+            const seq = ++this._histSeq;
+            const row = rows[(seq - 1) % HIST_MAX];
+            row.o.textContent = String(o == null ? '' : o);
+            row.t.textContent = String(t == null ? '' : t);
+            // 最新的排最上面：flex 列里 order 越小越靠前，所以用负的序号
+            row.el.style.order = String(-seq);
+            row.el.style.display = 'block';
+        },
+
+        /** 预建 HIST_MAX 行（每行 = 外层 div + 原文 div + 译文 div），只做一次 */
+        _initHistory(el) {
+            const rows = [];
+            for (let i = 0; i < HIST_MAX; i++) {
+                const div = document.createElement('div');
+                div.style.cssText = 'padding:4px 0;border-bottom:1px solid #23272f;display:none';
+                const o = document.createElement('div');
+                o.style.color = '#6b7280';
+                const t = document.createElement('div');
+                t.style.color = '#e6e8ee';
+                div.appendChild(o);
+                div.appendChild(t);
+                el.appendChild(div);
+                rows.push({ el: div, o, t });
+            }
+            this._histRows = rows;
+            this._histOwner = el;
+            this._histSeq = 0;
         },
 
         async testApi() {
@@ -5921,8 +6405,10 @@
                 sha256Hex, sha256HexJS, youdaoTruncate, uuidHex,
                 TT_POLICY, setHTML, escapeHtml, hexToRgb, openModal,
                 cacheGet, cachePut, panelHTML, panelCSS,
-                textSimilarity, thumbnail, thumbDiff, edgeDensity, parseModelJson,
+                textSimilarity, thumbnail, thumbDiff, thumbClose, edgeDensity, parseModelJson,
                 classifyError,
+                getShown, setShown, getShownOriginal, getShownTranslation, dedupeStats, SAMPLE_MODES,
+                beginAbortScope, endAbortScope, abortActiveScope, isAbortError, gmRequest,
                 findVideo, getContentBox, resolveRegion, anchorRegion,
                 sanitizeCfg, ENGINES, Fullscreen, uiHost, isHostDisabled, isTopFrame, watchForVideo,
                 isConfigured, invalidateFindVideoCache,

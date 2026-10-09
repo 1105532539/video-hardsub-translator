@@ -5,11 +5,34 @@
     //
     //  对外提供：cache、CACHE_MAX、cacheGet、cachePut、apiUrl、apiHeaders、
     //              shouldDisableThinking、buildChatBody、extractContent、
-    //              callChatCore、callChat
+    //              callChatCore、callChat、setShown、getShown、getShownOriginal、
+    //              getShownTranslation、dedupeStats
     //  依赖：CFG、gmRequest
     // ═══════════════════════════════════════════════════════════════
     const cache = new Map();          // 原文 -> 译文
     const CACHE_MAX = 500;
+
+    /**
+     * 「此刻显示在屏幕上的那一句」。由主循环在显示 / 清空字幕时写入（Pipeline.rememberShown）。
+     *
+     * 存在的理由：识别是免费的（本机 Umi-OCR / 端侧模型），**翻译才是要花钱的那一步**。
+     * 只有先把这句话和屏幕上的比一下，才能在付钱之前就发现「又是同一句」。
+     * 以前这道判断只在 present() 里做 —— 那时接口已经调过了，钱照扣、结果照丢。
+     */
+    let shownOriginal = '';
+    let shownTranslation = '';
+
+    function setShown(o, t) {
+        shownOriginal = String(o == null ? '' : o);
+        shownTranslation = String(t == null ? '' : t);
+    }
+
+    function getShown() { return { original: shownOriginal, translation: shownTranslation }; }
+    function getShownOriginal() { return shownOriginal; }
+    function getShownTranslation() { return shownTranslation; }
+
+    /** 免付费判重命中次数（诊断 / 测试用：证明「先判重」这条真的在省调用） */
+    const dedupeStats = { prePayHits: 0 };
 
     /** 取缓存。Map 迭代顺序 = 插入顺序，所以「命中后删掉再塞回去」等于把这条挪到队尾，淘汰时丢的永远是
      *  最久没用过的那条（原来是纯先进先出：一句反复出现的台词，中间插进 500 条新字幕就会被挤掉重翻）。 */

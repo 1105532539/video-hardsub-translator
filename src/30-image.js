@@ -7,7 +7,7 @@
     //    这句是不是和上一句重复（textSimilarity）
     //  离屏画布与 DP 滚动行缓冲都复用，不每轮新建。
     //
-    //  对外提供：thumbnail、thumbDiff、edgeDensity、textSimilarity
+    //  对外提供：thumbnail、thumbDiff、thumbClose、edgeDensity、textSimilarity
     //  依赖：THUMB_W、THUMB_H、EDGE_W、EDGE_H、EDGE_GRAD
     // ═══════════════════════════════════════════════════════════════
     /**
@@ -47,6 +47,25 @@
         let s = 0;
         for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
         return s / a.length / 255;
+    }
+
+    /**
+     * 两张缩略图是不是「就是同一张图」。比 thumbDiff 严格得多（那个是"变化不大"）：
+     * 均值差 < 0.0015 **且** 单点最大差 ≤ 6（灰度 0~255）。
+     *
+     * 用途只有一个：「上一帧买回来的答案因为与上句重复被丢弃了，下次遇到同一帧别再买」。
+     * 容差必须卡紧 —— 宽松一点就会把「换了句台词」的画面认成旧帧，结果是静默显示上一句
+     * 的译文，正是本项目最忌讳的那种错。
+     */
+    function thumbClose(a, b) {
+        if (!a || !b || a.length !== b.length) return false;
+        let sum = 0, max = 0;
+        for (let i = 0; i < a.length; i++) {
+            const d = Math.abs(a[i] - b[i]);
+            sum += d;
+            if (d > max) max = d;
+        }
+        return max <= 6 && sum / a.length / 255 < 0.0015;
     }
 
     /**

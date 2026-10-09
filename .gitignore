@@ -37,6 +37,7 @@ LunaTranslator/
 _test/_ab.json
 _test/_ab-summary.json
 _test/_bench-last.json
+_test/_sample-bench.json
 _test/_opt.txt
 # 测试启动时会从 _test/vendor/ 和 _test/fixtures/ 复制到这里
 _test/pages/hls.min.js

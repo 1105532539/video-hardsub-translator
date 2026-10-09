@@ -7,7 +7,8 @@
     //  对外提供：translateByVision、translateText、recognizeAndTranslate
     //  依赖：CFG、callChat、buildChatBody、parseModelJson、stripWrappingQuotes、
     //              cacheGet、cachePut、canvasToJpeg、callYoudaoImage、
-    //              recognizeByUmi、recognizeByBrowserAI、recognizeByWebTranslate
+    //              recognizeByUmi、recognizeByBrowserAI、recognizeByWebTranslate、
+    //              getShown、textSimilarity、dedupeStats
     // ═══════════════════════════════════════════════════════════════
     /** vision 模式：截图直接丢给视觉大模型，一步出结果。 */
     async function translateByVision(dataUrl) {
@@ -50,6 +51,19 @@
     async function translateText(original) {
         const text = String(original || '').trim();
         if (!text) return '';
+
+        // ⚡ 先判重、再付钱：能走到这里，说明识别已经完成了（本机 Umi-OCR / 端侧模型，不花钱），
+        //    而下面这一步是按次计费的。这句如果和屏幕上正在显示的那句是同一句，就直接复用
+        //    屏幕上的译文 —— 可见结果一模一样，但这一轮一次请求都不发。
+        //    以前这道判断只在 present() 里做，那时钱已经花掉了，只是把结果丢掉。
+        //    要求 shown.translation 非空：否则"上一句本来就没译文"时会返回空串，
+        //    被 present() 判成「只认出原文、没拿到译文」而弹警告。
+        const shown = getShown();
+        if (shown.original && shown.translation
+            && textSimilarity(text, shown.original) > (1 - CFG.textSimThreshold)) {
+            dedupeStats.prePayHits++;
+            return shown.translation;
+        }
 
         // 用 has 而不是真值判断：模型偶尔会返回空内容，空字符串是 falsy，用 `if (hit)` 的话这种
         // 缓存永远命中不了，同一句会被反复送到付费接口去重翻。

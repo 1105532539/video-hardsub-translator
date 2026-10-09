@@ -9,7 +9,7 @@
     //  因为全量写一次要动 30+ 个存储项。
     //
     //  对外提供：NS、DEFAULTS、ENGINES、BAI_OCR_CHOICES、BAI_TRANS_CHOICES、
-    //              WT_ENGINE_CHOICES、
+    //              WT_ENGINE_CHOICES、SAMPLE_MODES、
     //              NUM_RANGES、API_PRESETS、DS_VISION_MODELS、
     //              NO_VISION_MODELS、VISION_MARKERS、CFG、cloneDefault、loadCfg、
     //              sanitizeCfg、saveCfg、saveCfgKeys、isNoVisionModel、
@@ -73,7 +73,14 @@
         tgtLang: '简体中文',
 
         // ---- 截图与节奏 ----
-        interval: 1200,                         // 截图间隔(ms)
+        interval: 1200,                         // 截图间隔(ms)，同时也是两次付费调用之间的最小间隔
+        // 采样方式：
+        //   interval = 固定间隔轮询（默认，与历史行为完全一致）
+        //   frame    = 跟随视频帧：每来一个新画面帧都便宜地比一下（截图 + 缩略图，约 0.45ms），
+        //              但**两次付费调用之间仍然至少隔 interval**，所以不会更费钱，
+        //              只是把「字幕出现 → 被发现」从最多一个 interval 压到最多 200ms。
+        //              不支持 requestVideoFrameCallback 的环境会自动退回 interval。
+        sampleMode: 'interval',
         region: null,                           // 框选区域（页面坐标）
         regionHost: null,                       // 上面这个 region 是在哪个网站框的
         regionsByHost: {},                      // 按网站分别记住框选区域 { hostname: region }
@@ -135,6 +142,9 @@
     const BAI_OCR_CHOICES = ['umi', 'builtin'];
     const BAI_TRANS_CHOICES = ['auto', 'translator', 'prompt'];
 
+    // 采样方式，和面板上的 <option> 一一对应
+    const SAMPLE_MODES = ['interval', 'frame'];
+
     // 数值型配置的合法区间（和面板控件的 min/max 一致）
     const NUM_RANGES = {
         fontSize: [12, 48],
@@ -168,6 +178,8 @@
             ? DEFAULTS.pauseWhenHidden : !!cfg.pauseWhenHidden;
         cfg.panelOpen = cfg.panelOpen === undefined ? DEFAULTS.panelOpen : !!cfg.panelOpen;
         if (WT_ENGINE_CHOICES.indexOf(cfg.wtEngine) < 0) cfg.wtEngine = DEFAULTS.wtEngine;
+        // 采样方式同样是下拉框取值：坏值会让 <select> 显示空白，运行时却按别的模式跑
+        if (SAMPLE_MODES.indexOf(cfg.sampleMode) < 0) cfg.sampleMode = DEFAULTS.sampleMode;
 
         for (const k in NUM_RANGES) {
             const r = NUM_RANGES[k];

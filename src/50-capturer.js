@@ -105,10 +105,21 @@
             this.displayVideo = v;
             this.mode = 'display';
 
+            // 选错共享源（整个屏幕 / 另一个窗口）是一类**静默**失败：坐标基准是
+            // window.innerWidth/innerHeight，源一变，区域就整体错位 —— 脚本会稳定地截到
+            // 无关像素、OCR 出一堆乱字、钱照扣，而且不报错。这里做一个廉价的自检。
+            // ⚠️ 结论只记在实例上，**不在这里写状态栏**：调用方（UI.applyCaptureMode /
+            //    Pipeline.handleTainted）随后都会写一条"成功"状态，直接写会被覆盖掉，
+            //    用户永远看不到（这正是这个自检存在的意义）。
+            const settings = stream.getVideoTracks()[0].getSettings
+                ? (stream.getVideoTracks()[0].getSettings() || {}) : {};
+            this.displayMismatch = this.displaySourceMismatch(settings);
+
             stream.getVideoTracks()[0].addEventListener('ended', () => {
                 warn('屏幕共享已结束，切回 element 模式');
                 this.displayStream = null;
                 this.displayVideo = null;
+                this.displayMismatch = false;
                 this.mode = 'element';
                 UI.setStatus('共享已结束，已切回直接读取模式', 'warn');
             });
@@ -151,6 +162,21 @@
             }
             this._outCtx.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
             return this._out;
+        },
+
+        /**
+         * 共享源和本标签页「看起来不是同一个」吗？只比**宽高比**：
+         * 分辨率会因 DPR / 系统缩放而不同（那是正常的，grabFromDisplay 会按比例换算），
+         * 宽高比对不上才是真的选错了源。12% 的容差很保守 —— 16:9 与 16:10 只差 11%。
+         * 纯提示：不改任何行为，只是把一类静默失败变成看得见的警告。
+         */
+        displaySourceMismatch(settings) {
+            const w = Number(settings && settings.width) || 0;
+            const h = Number(settings && settings.height) || 0;
+            const ww = window.innerWidth, wh = window.innerHeight;
+            if (!w || !h || !ww || !wh) return false;
+            const src = w / h, win = ww / wh;
+            return Math.abs(src - win) / win > 0.12;
         },
 
         grabFromDisplay(region) {

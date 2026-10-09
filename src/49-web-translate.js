@@ -20,7 +20,7 @@
     //
     //  对外提供：WT_ENGINES、WT_DEFAULT_ORDER、wtStats、wtReset、wtOrder、
     //              wtLangPair、wtTranslate、wtSelftest、recognizeByWebTranslate
-    //  依赖：CFG、WT_ENGINE_CHOICES、gmRequest、canvasToJpeg、callUmiOCR、
+    //  依赖：CFG、WT_ENGINE_CHOICES、gmRequest、isAbortError、canvasToJpeg、callUmiOCR、
     //              cacheGet、cachePut、sleep、langCode、stripWrappingQuotes、
     //              log、warn、Diag
     // ═══════════════════════════════════════════════════════════════
@@ -231,6 +231,10 @@
                 cachePut(key, res);
                 return res;
             } catch (e) {
+                // ⚠️ 主动取消不是"这家引擎挂了"：它是整个请求被我们自己取消，
+                //    继续往下试只会再撞两次"已取消"、把统计记成失败、最后抛出一句
+                //    像是接口挂了的话 —— 主循环也就认不出这是取消（会报红字 + 退避）。
+                if (isAbortError(e)) throw e;
                 wtStat(id, false);
                 wtStats[id].lastError = String((e && e.message) || e);
                 warn('免费接口 ' + id + ' 失败：', e);

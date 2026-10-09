@@ -10,7 +10,7 @@
     //
     //  对外提供：UMI_LANGS、umiBase、umiNiceError、callUmiOCR、umiProbe、
     //              recognizeByUmi
-    //  依赖：CFG、gmRequest、stripDataUrlPrefix、canvasToJpeg、translateText
+    //  依赖：CFG、gmRequest、isAbortError、stripDataUrlPrefix、canvasToJpeg、translateText
     // ═══════════════════════════════════════════════════════════════
     /** Umi-OCR 的语言选项 → 引擎配置文件 */
     const UMI_LANGS = [
@@ -60,6 +60,10 @@
                 timeout: 30000,
             });
         } catch (e) {
+            // ⚠️ 主动取消（停止 / 换区域 / 切后台）必须先原样抛出去：底下那句包装会造一个
+            //    全新的 Error，把 aborted 标记丢掉 —— 主循环就认不出这是"取消"，
+            //    于是把停止当成"连不上 Umi-OCR"报红字并进入退避。
+            if (isAbortError(e)) throw e;
             throw new Error(umiNiceError(e));
         }
 
@@ -97,6 +101,7 @@
                 timeout: 8000,
             });
         } catch (e) {
+            if (isAbortError(e)) throw e;      // 同 callUmiOCR：取消不能被包装成"连不上"
             throw new Error(umiNiceError(e));
         }
         if (r.status < 200 || r.status >= 300) {

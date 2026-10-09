@@ -170,18 +170,18 @@ npm run lint           # 构建 + 语法检查
 | `20-video` | `findVideo` | 找到页面上"最大"的 `<video>`（主播放器） |
 | `22-site` | `isHostDisabled` `banCurrentHost` `isTopFrame` `watchForVideo` `syncRegionForHost` `rememberRegion` | 按站点决定是否介入、视频后加载监听、按站点记忆区域 |
 | `24-region` | `getContentBox` `resolveRegion` `anchorRegion` | 画面内容框推算与区域锚定换算 |
-| `30-image` | `thumbnail` `thumbDiff` `edgeDensity` `textSimilarity` | 三个"要不要花钱调 API"的判定 |
+| `30-image` | `thumbnail` `thumbDiff` `thumbClose` `edgeDensity` `textSimilarity` | 三个"要不要花钱调 API"的判定 + 「是不是同一张图」的紧容差比较 |
 | `32-util` | `parseModelJson` `sleep` `canvasToJpeg` `stripDataUrlPrefix` `stripWrappingQuotes` | 纯计算小工具 |
-| `40-http` | `gmRequest` | `GM_xmlhttpRequest` Promise 封装（绕 CORS） |
+| `40-http` | `gmRequest` `beginAbortScope` `endAbortScope` `abortActiveScope` `isAbortError` | `GM_xmlhttpRequest` Promise 封装（绕 CORS）**与请求的取消作用域** |
 | `42-youdao-sign` | `sha256Hex` `sha256HexJS` `youdaoTruncate` `uuidHex` `YOUDAO_ERR` | 有道签名素材与错误码翻译 |
 | `44-umi-ocr` | `UMI_LANGS` `callUmiOCR` `umiProbe` `recognizeByUmi` `umiBase` | 本机 Umi-OCR 识别（零下载） |
 | `46-youdao-image` | `callYoudaoImage` | 有道图片翻译（OCR + 翻译一步） |
 | `48-browser-ai` | `baiProbe` `baiPrepare` `baiTranslate` `baiOcrByBuiltin` `recognizeByBrowserAI` | 浏览器内置 AI：完全离线的识别 / 翻译 |
 | `49-web-translate` | `wtTranslate` `wtSelftest` `wtLangPair` `wtStats` `recognizeByWebTranslate` | 免费网页接口（逆向）：降级链、限速、token 重取 |
 | `50-capturer` | `Capturer` | 双后端截图、裁切缩放、污染处理 |
-| `60-chat` | `cacheGet` `cachePut` `apiUrl` `buildChatBody` `extractContent` `callChatCore` `callChat` | LRU 缓存、请求构造、响应解析、HTTP 错误翻译 |
-| `62-engines` | `translateByVision` `translateText` `recognizeAndTranslate` | 五种引擎的统一入口 |
-| `70-pipeline` | `Pipeline` | 定时、守卫、跳过判定、结果展示、错误恢复 |
+| `60-chat` | `cacheGet` `cachePut` `apiUrl` `buildChatBody` `extractContent` `callChatCore` `callChat` `setShown` `getShown` | LRU 缓存、请求构造、响应解析、HTTP 错误翻译、**「屏幕上那一句」的唯一存储**（供「先判重再付钱」用） |
+| `62-engines` | `translateByVision` `translateText` `recognizeAndTranslate` | 五种引擎的统一入口（`translateText()` 在调接口**之前**先判重） |
+| `70-pipeline` | `Pipeline` | 定时 / 帧驱动采样、守卫、跳过判定、结果展示、错误恢复 |
 | `80-overlay` | `Overlay` | 字幕渲染、定位 |
 | `82-fullscreen` | `Fullscreen` `uiHost` | 全屏时搬移 UI、`<video>` 全屏时改走原生字幕轨 |
 | `84-html` | `escapeHtml` `setHTML` `TT_POLICY` `hexToRgb` | Trusted Types 兼容层与样式小工具 |
@@ -201,16 +201,23 @@ npm run lint           # 构建 + 语法检查
 ### 一次完整循环
 
 ```
-tick()                          ← setTimeout 驱动，间隔 CFG.interval（≥300ms）
+tick()                          ← 两种驱动方式（CFG.sampleMode）
+ │                                 interval：setTimeout，间隔 CFG.interval（≥300ms）
+ │                                 frame：视频新帧 + FRAME_SAMPLE_MS 节流 + 看门狗兜底
  └─ step()
      ├─ findVideo()                   找到页面上面积最大的合格 <video>
      ├─ ensureReady(video)            视频存在？已框选？未暂停？上一轮已返回？
      ├─ grabFrame(video)              Capturer.grab → canvas（失败/污染则走岔路）
      ├─ stats.shots++
      ├─ shouldSkipFrame(canvas)       变化检测 + 边缘密度，通过则返回
-     ├─ recognize(canvas, myGen)      调引擎；返回前校验代是否仍然有效
+     ├─ 【frame 模式】没到 nextDue？   画面变了但离上次付费不够久 → 先不花钱
+     ├─ recognize(canvas, myGen)      开取消作用域 → 调引擎；返回前校验代是否仍然有效
      └─ present(res)                  四分支决定：清空 / 保持 / 保持 / 显示
 ```
+
+`step()` 的返回值是「这一轮有没有**真的调过付费接口**」：`frame` 模式用它推进
+`nextDue`（两次付费调用之间的最小间隔）。**只采样、没花钱的那些轮次不占用额度** ——
+否则字幕出现后还要再干等一个 interval，等于把这一项的收益白白丢掉。
 
 ### 为什么把 `step()` 拆成这么多小方法
 
@@ -302,12 +309,16 @@ if (sw * scale > 1400) scale = 1400 / sw;         // 宽度封顶 1400
 | `gen` | **代**计数器，每次 start/stop/换区域/暂停 +1 |
 | `lastThumb` | 上一帧缩略图（变化检测基准）。**只在没被跳过时更新** |
 | `lastSentThumb` | 上一次**花钱识别过**的那一帧（跳过判据用它，与识别结果解耦） |
-| `lastOriginal` / `lastTranslation` | 上一句原文/译文（去重与回退基准） |
+| `repeatThumbs` | 「买回来又被判为重复句」的那几帧的指纹（最多 4 个）。命中就跳过，屏幕上的句子一换就清空 |
+| `lastOriginal` / `lastTranslation` | 上一句原文/译文（去重与回退基准）。**存在 `60-chat.js` 里**，这里是转发到它的访问器 —— 引擎层要在付钱前读同一份，两份状态各写各的迟早会漂移 |
 | `emptyStreak` | 连续空帧计数（连续 2 帧才清空字幕，避免闪烁） |
 | `hiddenPaused` | 是否因切到后台而暂停（区分「用户按了停止」与「只是切走了」） |
 | `failStreak` | 连续失败次数（指数退避用，成功一次即清零） |
 | `missVideo` | 连续找不到视频的轮数（30 轮后自动停止） |
-| `stats` | `{shots, apiCalls, skipped, errors}` |
+| `nextDue` / `nextSample` | `frame` 采样模式专用的两个时刻：下一次**允许花钱**、下一次**允许看一眼画面** |
+| `_rvfc` / `_rvfcVideo` | `requestVideoFrameCallback` 的句柄与它所属的 video（取消必须成对） |
+| `_rvfcFrameOK` / `_rvfcMisses` | 这个页面的视频帧回调到底会不会来；不来就由看门狗接管（等价于固定间隔模式）并提示一次 |
+| `stats` | `{shots, apiCalls, skipped, errors, samples, skipNoChange, skipNoText, skipRepeat}`；形状集中在 `resetStats()` 里定义 |
 
 ### 代（generation）机制
 
@@ -344,8 +355,9 @@ if (myGen !== this.gen || !this.running) {
 | 顺序 | 判定 | 默认阈值 | 成本 |
 | --- | --- | --- | --- |
 | 1 | 32×16 灰度缩略图平均绝对差 | `< 0.004` 视为画面未变 | 极低 |
+| 1b | `thumbClose()` 对上「上次买回来又被判为重复」的帧 | 均值差 `< 0.0015` **且**单点最大差 `≤ 6` | 极低 |
 | 2 | 160×48 边缘密度 | `< 0.035` 视为无文字 | 低 |
-| — | 文本相似度（在 `present()` 中） | `sim > 1 - 0.28 = 0.72` 视为同一句 | 低 |
+| — | 文本相似度 | `sim > 1 - 0.28 = 0.72` 视为同一句 | 低 |
 
 第 1 步命中且 `lastSentThumb` 非空时**直接返回** —— 预览重绘也一并跳过（画面一模一样时重画 `drawImage` 纯属浪费）。
 
@@ -353,6 +365,15 @@ if (myGen !== this.gen || !this.running) {
 > 后者会在识别结果为空时被 `present()` 清成 `''`，于是「画面静止 + 边缘密度够高 +
 > 认不出文字」会让跳过永久失效，同一张逐像素相同的图被反复送去付费识别。
 > 用 `lastSentThumb` 就与识别结果解耦了：同一张图只买一次，无论买回来的是不是空。
+
+**文本相似度这一步的位置（v1.14.0 起分两处，方向相反）**：
+
+| 引擎 | 判重时机 | 说明 |
+| --- | --- | --- |
+| `umi-ocr` / `web-translate` / `browser-ai`（配 Umi-OCR） | **付钱之前**（`translateText()` 里） | 识别是本地免费的，翻译才收费。`60-chat.js` 的 shown 状态就是"屏幕上那一句"，命中就复用译文，零请求 |
+| `openai-vision` / `youdao-img` | 付钱之后（`present()` 里，不变） | 一次调用同时完成 OCR + 翻译，**没法在付钱前知道文字**；退一步把这一帧的指纹记进 `repeatThumbs`，下次遇到同一帧不再买 |
+
+两处用的是同一个阈值与同一个 `textSimilarity()`，所以可见行为一致 —— 区别只在"钱花没花"。
 
 第 2 步命中会累加 `emptyStreak`，连续 ≥2 帧才清空悬浮层，避免字幕一闪一闪。
 
@@ -368,14 +389,27 @@ if (myGen !== this.gen || !this.running) {
 ### 生命周期
 
 ```
-start()  → 校验已框选 → invalidate() → running=true → 复位 lastThumb/emptyStreak/failStreak → tick()
-stop()   → running=false → invalidate() → 清定时器 → busy=false
-           → Overlay.clear() → 清 lastOriginal/lastTranslation/lastSentThumb/emptyStreak
+start()  → 校验已框选 → invalidate() → running=true → 复位 lastThumb/repeatThumbs/emptyStreak/failStreak → tick()
+stop()   → running=false → invalidate() → 清定时器 + 取消 rvfc 句柄 → busy=false
+           → Overlay.clear() → 清 lastOriginal/lastTranslation/lastSentThumb/emptyStreak/repeatThumbs
 toggle() → running ? stop() : start()
 
-pauseForHidden()  → hiddenPaused=true → invalidate() → 清定时器（**不算停止**，保留 running 与 lastSentThumb）
+pauseForHidden()  → hiddenPaused=true → invalidate() → 清定时器 + rvfc（**不算停止**，保留 running 与 lastSentThumb）
 resumeFromHidden()→ hiddenPaused=false → invalidate() → 若仍在运行则继续 tick()
 ```
+
+`invalidate()` 干两件事：`gen++`（作废在飞结果）与 `abortActiveScope()`
+（**真正中断在飞请求**）。后者是 v1.14.0 加的：只作废结果的话，服务端仍会把那段
+你已经不需要的回复生成完，`maxTokens` 范围内的 token 照扣。取消作用域由
+`recognize()` 在调引擎前后 `beginAbortScope()` / `endAbortScope()` 建立，这期间创建的
+GM 请求全部登记在案；作用域**外**创建的请求（手动截一帧、诊断、测试连接）不受影响。
+
+> 这里刻意没做参数穿透（那要改 5 个引擎和各自的调用链，漏一处就少一条取消路径）。
+> 代价是同一瞬间由别的入口创建的请求也会被登记 —— 都是一次性的人工操作，最坏只是
+> 跟着报一句「请求已取消」，不会静默算错。
+>
+> 取消**不算失败**：`stepRecognize()` 把它收在内部，不往上抛（否则 `tick()` 会当成
+> 错误去退避、弹红字），但返回值仍表示"请求确实发出去了"，照常推进最小间隔。
 
 `stop()` 必须把 `lastSentThumb` 与 `lastOriginal` **一起**清掉：前者标记「这一帧已经
 买过了」，而后者刚被丢弃。只清后者会让重开后的静止画面被判成"已买过"而跳过 ——
@@ -383,6 +417,25 @@ resumeFromHidden()→ hiddenPaused=false → invalidate() → 若仍在运行则
 
 `pauseForHidden()` 相反地**要保留**它们：后台暂停只是没人在看，切回来画面多半没变，
 没必要为同一帧再花一次钱。两者的差异是刻意的，别顺手"统一"掉。
+
+### 两种采样方式（`CFG.sampleMode`）
+
+| 模式 | 驱动 | 备注 |
+| --- | --- | --- |
+| `interval`（默认） | `setTimeout(tick, wait)` | 行为与历史版本完全一致 |
+| `frame` | `video.requestVideoFrameCallback` + 看门狗 | 每个新帧便宜地比一次；付费仍被 `nextDue` 卡住 |
+
+`frame` 模式的三个不变量（改它之前先看 `_test/opt.mjs` 的 12o 套件）：
+
+1. **省钱的上限不变**：`nextDue = 本轮开始时刻 + wait`，只在"真的调了接口"或"刚失败
+   要退避"时推进；`step()` 在付钱之前先检查它。所以两次付费调用之间至少隔
+   `CFG.interval`，单位时间调用次数**不会比 interval 模式多**。
+2. **最坏不比默认慢**：看门狗定时器设成与 `wait` 同节奏（而不是宽裕的 2 秒）。
+   因为实测发现 `requestVideoFrameCallback` 可能**存在却从不回调**（无头 Chrome 的
+   合成视频流：2 秒 0 次，而 rAF 跑了 122 次）—— 那时看门狗顶上，行为等价于固定间隔。
+   连发 3 次后会在状态栏说明一次，不让用户以为自己走在更快的那条路上。
+3. **句柄成对**：`_rvfc` 必须与 `_rvfcVideo` 一起清（`cancelVideoFrameCallback`
+   要用同一个元素）；`tick()` 开头、`stop()`、`pauseForHidden()` 都会清。
 
 ---
 
@@ -635,7 +688,7 @@ fullscreenchange
 - 相似度 DP 交换长短串只影响滚动行长度，编辑距离与 `1 - dist/max(m,n)` 都是对称的；
 - 画布复用不改变任何调用方的可观察行为（全部"拿到即用"）。
 
-回归验证：**536 项端到端测试全部通过**，A/B 基准无指标回退。
+回归验证：**584 项端到端测试全部通过**，A/B 基准无指标回退。
 
 ---
 
@@ -710,7 +763,7 @@ async function recognizeAndTranslate(canvas, opts) {
 
 **4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS` 并把枚举值纳入 `sanitizeCfg()` 的兜底），然后在 `UI.syncEngineUI()` 里控制其显隐。
 
-**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 536 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
+**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 584 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
 
 ---
 

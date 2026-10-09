@@ -1,6 +1,6 @@
 {
   "name": "video-hardsub-translator",
-  "version": "1.13.1",
+  "version": "1.14.0",
   "description": "网页视频硬字幕实时翻译：框选字幕区 → 定时截图 → OCR/多模态大模型 → 悬浮中文字幕。五种引擎：视觉大模型 / Umi-OCR 本地识别 / 浏览器内置 AI / 免费网页接口 / 有道图片翻译，其中两种不需要 API Key。",
   "private": true,
   "license": "GPL-3.0-or-later",
@@ -45,6 +45,7 @@
     "lint": "node _build/build.mjs && node --check video-hardsub-translator.user.js",
     "bench": "node _test/bench.mjs",
     "bench:ab": "node _test/bench-ab.mjs",
+    "bench:sample": "node _test/bench-sample.mjs",
     "structure": "node _test/structure.mjs",
     "shots": "node _test/shots.mjs"
   }
