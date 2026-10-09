@@ -8,7 +8,7 @@
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-green.svg)
 ![runtime](https://img.shields.io/badge/runtime-Node.js%20%E2%89%A5%2022-brightgreen.svg)
-![tests](https://img.shields.io/badge/tests-584%20passed-success.svg)
+![tests](https://img.shields.io/badge/tests-594%20passed-success.svg)
 ![deps](https://img.shields.io/badge/dependencies-0-success.svg)
 
 ---
@@ -137,7 +137,7 @@
 
 ### 工程与可维护性
 
-- **584 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
+- **594 项端到端测试**，覆盖引擎协议、UI 行为、全站运行策略、布局几何、全屏搬移、性能基准。
 - **A/B 性能基准**工具：新旧两版交替跑、取中位数，输出逐项差异。
 - **零第三方依赖**：测试框架基于 Node 内置 WebSocket 直接驱动 Chrome DevTools Protocol。
 
@@ -780,6 +780,9 @@ video-hardsub-translator/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug_report.yml             # Issue 模板：缺陷报告
 │   │   └── feature_request.yml        # Issue 模板：功能建议
+│   ├── workflows/
+│   │   ├── ci.yml                     #   产物一致性 + 全部测试（push / PR）
+│   │   └── release.yml                #   打 tag 即发版：建 Release + 传脚本附件
 │   └── PULL_REQUEST_TEMPLATE.md       # PR 模板
 │
 ├── docs/
@@ -789,7 +792,8 @@ video-hardsub-translator/
 │   └── local-ocr-design.md            # 本地 OCR 方案设计笔记
 │
 ├── _build/                            # 构建（零依赖：只用 Node 内置模块）
-│   └── build.mjs                      #   按编号顺序拼接 src/ → 根目录产物 + 完整性校验
+│   ├── build.mjs                      #   按编号顺序拼接 src/ → 根目录产物 + 完整性校验
+│   └── release-notes.mjs              #   从 CHANGELOG 抽出某版本的更新说明（供 Release 用）
 │
 └── _test/                             # 端到端测试套件（零依赖，CDP 驱动真实 Chrome；测的是根目录产物）
     ├── cdp.mjs                        # 零依赖 CDP 封装（内置 WebSocket 驱动 Chrome）
@@ -851,7 +855,7 @@ video-hardsub-translator/
 零第三方依赖，用 Node 内置 `WebSocket` 直连 Chrome DevTools Protocol 驱动**真实浏览器**，以 `GM_*` 桩拦截网络请求，因此**不需要真实 API Key**。
 
 ```bash
-node _test/build.mjs         # 27 项  构建守卫本身：重名、依赖对账、版本号、语法门、--check 漂移（不起 Chrome）
+node _test/build.mjs         # 37 项  构建守卫本身：重名、依赖对账、版本号、语法门、--check 漂移（不起 Chrome）
 node _test/engine.mjs        # 50 项  引擎协议：请求体、思考模式参数、响应解析、错误提示
 node _test/browser-ai.mjs    # 96 项  浏览器内置 AI 离线引擎：语言映射、探测、全离线链路、流式、经英语中转、快照时序
 node _test/web-translate.mjs # 44 项  免费网页接口：语言码映射、降级链、token 重取、限速、缓存、测活
@@ -863,7 +867,7 @@ node _test/layout.mjs        # 33 项  布局几何：面板在视口内、控�
 node _test/fullscreen.mjs    # 31 项  全屏：UI 搬进全屏容器、原生字幕轨回退
 ```
 
-当前状态：**584 / 584 全部通过**。
+当前状态：**594 / 594 全部通过**。
 
 ### 性能基准
 
@@ -1084,7 +1088,21 @@ npm test              # 全部 9 个套件（会自动先跑一次 npm run build
 > 所以「改了 `src/` 却忘了构建」永远不会让测试失败。**两个都要跑。**
 > CI 也据此拆成两个 job（见 `.github/workflows/ci.yml`）。
 
-**584 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
+**594 项测试必须全部通过**；若属于性能相关改动，请一并附上 `bench-ab.mjs` 的前后对比数据。
+
+### 发版（打 tag 即发版）
+
+```bash
+# ① 在 CHANGELOG.md 写下 `## [x.y.z] - 日期` 与正文
+# ② 把版本号递增到 x.y.z（@version / SCRIPT_VERSION / package.json / README 徽标）
+git commit -am "chore(release): vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main --tags     # ← Release 由 .github/workflows/release.yml 自动建
+```
+
+Release 的**更新说明直接取自 `CHANGELOG.md` 的对应段落**（`_build/release-notes.mjs`），
+并把脚本产物作为附件上传，所以不存在"网上写的说明和仓库里不一致"。
+忘了写 CHANGELOG、或 tag 与版本号对不上，`npm test` 里的构建守卫与这个流程都会直接失败。
 
 ---
 

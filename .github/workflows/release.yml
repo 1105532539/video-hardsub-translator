@@ -1,0 +1,69 @@
+name: Release
+
+# 打 tag 即发版：把「建 Release + 写更新说明 + 传脚本附件」这三件手工活一次做完。
+#
+# 为什么要有它：GitHub 上建 Release 只能走 API，本机没 token 就得每次手动点网页、
+# 手动粘更新说明 —— 而「说明」一旦手写就会和 CHANGELOG 不一致（这个项目管那叫口径漂移）。
+# 现在说明**直接从 CHANGELOG.md 抽**（_build/release-notes.mjs），发版流程是：
+#
+#     ① 在 CHANGELOG.md 写下 `## [x.y.z] - 日期` 与正文
+#     ② 把版本号递增到 x.y.z（package.json / @version / SCRIPT_VERSION 三处，
+#        构建脚本会校验一致性；忘了递增的话本流程第一步就会失败）
+#     ③ git tag -a vX.Y.Z && git push origin vX.Y.Z
+#
+# 之后 GitHub 自己会用仓库的 GITHUB_TOKEN 建 Release —— **本机不需要任何凭据**。
+# 也可以在这里手动触发（Actions → Release → Run workflow，填已有的 tag）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发版的 tag（必须已经存在，如 v1.14.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write        # 建 Release 与上传附件都需要
+
+jobs:
+  release:
+    name: 从 tag 建 Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 手动触发时用输入的那个 tag；tag 推送时就是它自己
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 产物必须与 src/ 一致（发出去的得就是仓库里那份）
+        run: node _build/build.mjs --check
+
+      - name: 从 CHANGELOG 抽出这一版的更新说明
+        run: |
+          node _build/release-notes.mjs "${{ inputs.tag || github.ref_name }}" > "$RUNNER_TEMP/notes.md"
+          echo "说明共 $(wc -l < "$RUNNER_TEMP/notes.md") 行"
+          head -5 "$RUNNER_TEMP/notes.md"
+
+      - name: 建 Release（已存在就更新说明与附件）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          ASSET=video-hardsub-translator.user.js
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "已存在 $TAG，改为更新说明与附件"
+            gh release edit "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --verify-tag
+          fi
+          gh release view "$TAG" --json url,tagName,isLatest --jq '"✅ " + .url + "  latest=" + (.isLatest|tostring)'

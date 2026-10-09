@@ -289,7 +289,7 @@ npm run lint                 # 构建 + node --check 语法检查
 
 npm test                     # 全部 9 个测试文件：构建守卫 + 8 个浏览器套件（会自动先跑一次 npm run build）
 
-node _test/build.mjs         # 期望 27/27
+node _test/build.mjs         # 期望 37/37
 node _test/engine.mjs        # 期望 50/50
 node _test/browser-ai.mjs    # 期望 96/96
 node _test/web-translate.mjs # 期望 44/44
@@ -300,7 +300,7 @@ node _test/layout.mjs        # 期望 33/33
 node _test/fullscreen.mjs    # 期望 31/31
 ```
 
-**584 项必须全部通过，且退出码为 0。**
+**594 项必须全部通过，且退出码为 0。**
 
 ### 新功能 / 修 Bug 必须带测试
 
@@ -344,7 +344,7 @@ Closes #123
 
 ## 测试
 - [ ] node --check 通过
-- [ ] 9 个测试套件全部通过（584/584）
+- [ ] 9 个测试文件全部通过（594/594，构建守卫 + 8 个浏览器套件）
 - [ ] 新增/修改的测试能证明修复有效
 
 ## 行为影响
@@ -392,20 +392,28 @@ node _test/shots.mjs     # 输出到 _test/shots/
 
 ## 版本发布流程
 
-1. 确认 `main` 上全部测试通过（`npm test`，应 584 项全部通过）。
+1. 确认 `main` 上全部测试通过（`npm test`，应 594 项全部通过）。
 2. 更新**四处**版本号（必须全部一致——只改前两处会导致包版本与 README 徽章和脚本版本脱节）：
    - 用户脚本头部元数据 `// @version      <新版本号>`
    - 脚本内 `const SCRIPT_VERSION = '<新版本号>';`
    - `package.json` 的 `version`
    - `README.md` 顶部的 version 徽章
-3. 更新 `CHANGELOG.md`，把 `[未发布]` 改为具体版本与日期。
+3. 更新 `CHANGELOG.md`，把 `[未发布]` 改为具体版本与日期（`## [x.y.z] - YYYY-MM-DD`）。
 4. 提交并打标签：
    ```bash
    git commit -am "chore(release): v<新版本号>"
    git tag -a v<新版本号> -m "v<新版本号>"
    git push origin main --tags
    ```
-5. 在 GitHub 上创建 Release，附上 CHANGELOG 对应段落，并上传 `video-hardsub-translator.user.js` 作为附件（方便用户直接下载安装）。
+5. **Release 由 CI 自动建**，不用再手工点网页：`.github/workflows/release.yml` 在收到
+   `v*` tag 时会校验产物一致性、用 `_build/release-notes.mjs` **从 CHANGELOG 抽出这一版的
+   说明**、建 Release 并把 `video-hardsub-translator.user.js` 作为附件上传。
+   - 说明取自 CHANGELOG，所以不存在"网上写的说明和仓库不一致"。
+   - 需要重发或补发时：Actions → Release → Run workflow，填一个**已存在**的 tag 即可
+     （已存在 Release 的话它会改成更新说明与附件，可反复重跑）。
+   - 忘了写 CHANGELOG 或 tag 与 `package.json` 的版本不一致时，这一步会**失败**而不是
+     发出一个空的/版本号错的 Release；`npm test` 里的构建守卫（`_test/build.mjs` 第 12 节）
+     会在更早的时候就拦下来。
 6. 同步到 Greasy Fork（见下节）。
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)：

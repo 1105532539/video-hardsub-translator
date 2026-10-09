@@ -688,7 +688,7 @@ fullscreenchange
 - 相似度 DP 交换长短串只影响滚动行长度，编辑距离与 `1 - dist/max(m,n)` 都是对称的；
 - 画布复用不改变任何调用方的可观察行为（全部"拿到即用"）。
 
-回归验证：**584 项端到端测试全部通过**，A/B 基准无指标回退。
+回归验证：**594 项端到端测试全部通过**，A/B 基准无指标回退。
 
 ---
 
@@ -763,7 +763,7 @@ async function recognizeAndTranslate(canvas, opts) {
 
 **4. 面板 UI**：在 `panelHTML()` 的引擎下拉里加 `<option>`，并新增对应配置项（记得同步 `DEFAULTS` 并把枚举值纳入 `sanitizeCfg()` 的兜底），然后在 `UI.syncEngineUI()` 里控制其显隐。
 
-**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 584 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
+**测试要求**：在 `_test/engine.mjs` 的 `GM_xmlhttpRequest` 桩里按 URL 匹配返回模拟响应，断言请求体与解析结果；并确保既有的 594 项测试仍然全绿。若新引擎依赖浏览器专有 API（像 `browser-ai` 依赖 `Translator` / `LanguageModel`），照 `_test/browser-ai.mjs` 的做法给这些全局对象打一套行为一致的替身，别让测试去下载真实模型。
 
 ---
 

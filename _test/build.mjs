@@ -218,6 +218,74 @@ withSandbox((dir) => {
     check('警告点名 thumbnail', /thumbnail/.test(r.out), r.out.slice(0, 300));
 });
 
+// ── 12. 发版说明（GitHub Release 的更新说明）与 CHANGELOG 对账 ──────
+//     .github/workflows/release.yml 会在打 tag 时调 _build/release-notes.mjs 抽说明。
+//     这一节把它的三条前提变成机器能拦的错误 —— 此前「发了版却没写更新说明」「tag 打在
+//     版本号还没递增的提交上」都只能靠人记得。
+S('12. 发版说明与 CHANGELOG 对账');
+
+const NOTES = path.join(ROOT, '_build', 'release-notes.mjs');
+const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+function runNotes(dir, tag) {
+    try {
+        const out = execFileSync(process.execPath, [path.join(dir, '_build', 'release-notes.mjs'), tag], {
+            cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return { code: 0, out };
+    } catch (e) {
+        return { code: e.status === undefined ? -1 : e.status, out: String(e.stdout || '') + String(e.stderr || '') };
+    }
+}
+
+// ① 当前版本必须抽得出说明（"发了版却没写更新说明"就是这条在拦）
+const real = runNotes(ROOT, 'v' + PKG.version);
+check(`当前版本 v${PKG.version} 在 CHANGELOG 里抽得出更新说明`, real.code === 0,
+    'exit ' + real.code + ' ' + real.out.slice(0, 200));
+check('抽出来的说明不是空的，而且带着小节标题（不是只剩一个版本号）',
+    real.code === 0 && /^###? /m.test(real.out), real.out.slice(0, 200));
+
+// ② tag 与 package.json 对不上（版本号忘了递增）必须失败，而不是发一个版本号错的 Release
+const mismatch = runNotes(ROOT, 'v0.0.1');
+check('tag 与 package.json 版本不一致时明确失败', mismatch.code !== 0, 'exit ' + mismatch.code);
+check('报错说清该怎么办（先递增版本号）', /递增到同一个值/.test(mismatch.out), mismatch.out.slice(0, 200));
+
+// ③ 参数压根不是版本号
+const junk = runNotes(ROOT, 'latest');
+check('非版本号参数被拒', junk.code !== 0 && /不像一个版本号/.test(junk.out), junk.out.slice(0, 200));
+
+// ④ CHANGELOG 里缺这一节（模拟"忘了写"）→ 必须报错，而不是发一个空说明
+{
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'h1sub-notes-'));
+    try {
+        fs.mkdirSync(path.join(dir, '_build'), { recursive: true });
+        fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
+        fs.copyFileSync(NOTES, path.join(dir, '_build', 'release-notes.mjs'));
+        const cl = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+        const esc = PKG.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const stripped = cl.replace(new RegExp('## \\[' + esc + '\\][\\s\\S]*?(?=\\n## \\[)'), '');
+        fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), stripped, 'utf8');
+        const r = runNotes(dir, 'v' + PKG.version);
+        check('CHANGELOG 缺这一节时明确失败（而不是发一个空说明）',
+            r.code !== 0 && /没有 \[/.test(r.out), 'exit ' + r.code + ' ' + r.out.slice(0, 200));
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+// ⑤ 发版流程本身别被误删：workflow 存在、调了这个脚本、并且有写 Release 的权限
+{
+    const wfPath = path.join(ROOT, '.github', 'workflows', 'release.yml');
+    const wf = fs.existsSync(wfPath) ? fs.readFileSync(wfPath, 'utf8') : '';
+    check('发布 workflow 存在', wf.length > 0);
+    check('它会调 release-notes.mjs 取说明（说明不是手写的）',
+        /release-notes\.mjs/.test(wf), wf.slice(0, 100));
+    check('它有 contents: write 权限（否则建不了 Release）',
+        /contents:\s*write/.test(wf), wf.slice(0, 100));
+    check('它会把脚本产物作为附件传上去',
+        /video-hardsub-translator\.user\.js/.test(wf), wf.slice(0, 100));
+}
+
 // ── 汇总 ─────────────────────────────────────────────────────────
 const pass = R.filter(x => x.pass).length;
 const fail = R.length - pass;
